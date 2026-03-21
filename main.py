@@ -6,33 +6,17 @@ import seaborn as sns
 import plotly.express as px
 import plotly.graph_objects as go
 
-from pathlib import Path
-
 st.set_page_config(page_title="Busy Buffet Analytics", layout="wide")
 st.title("🍽️ Busy Buffet Analytics Dashboard")
 
 uploaded_file = st.file_uploader("อัปโหลดไฟล์ Excel หรือ CSV", type=['xlsx', 'csv'])
 
-default_data_path = Path(__file__).resolve().parent / 'Dataexcel' / '2026 Data Test1 Final - Busy Buffet Dataset.xlsx'
-
-data_file = None
 if uploaded_file is not None:
-    data_file = uploaded_file
-    st.info(f"ใช้ข้อมูลจากไฟล์อัปโหลด: {uploaded_file.name}")
-elif default_data_path.exists():
-    data_file = default_data_path
-    st.info(f"ใช้ข้อมูลจากไฟล์ท้องถิ่น: {default_data_path}")
-
-if data_file is not None:
-    if isinstance(data_file, (str, Path)):
-        file_ext = Path(data_file).suffix.lower().lstrip('.')
-    else:
-        file_ext = data_file.name.split('.')[-1].lower()
-
+    file_ext = uploaded_file.name.split('.')[-1].lower()
     if file_ext == 'csv':
-        all_sheets = {'Sheet1': pd.read_csv(data_file)}
+        all_sheets = {'Sheet1': pd.read_csv(uploaded_file)}
     else:
-        all_sheets = pd.read_excel(data_file, sheet_name=None)
+        all_sheets = pd.read_excel(uploaded_file, sheet_name=None)
     cols = ['service_no.', 'pax', 'queue_start', 'queue_end', 'table_no.', 'meal_start', 'meal_end', 'Guest_type']
     dfs = []
     for sheet_name, df_temp in all_sheets.items():
@@ -349,11 +333,11 @@ if data_file is not None:
 
             # KDE Plot (Smooth distribution)
             sns.kdeplot(data=df_inhouse, x='meal_duration_mins', fill=True, 
-                color='#3498db', label=f"In-house (Median: {inhouse_stats['median']}m)", 
-                alpha=0.5, ax=ax1, linewidth=2)
+                        color='#3498db', label=f"In-house (Median: {inhouse_stats['median']}m)", 
+                        alpha=0.5, ax=ax1, linewidth=2)
             sns.kdeplot(data=df_walkin, x='meal_duration_mins', fill=True, 
-                color='#e74c3c', label=f"Walk-in (Median: {walkin_stats['median']}m)", 
-                alpha=0.4, ax=ax1, linewidth=2)
+                        color='#e74c3c', label=f"Walk-in (Median: {walkin_stats['median']}m)", 
+                        alpha=0.4, ax=ax1, linewidth=2)
 
             # ขีดเส้น proposed_cap
             ax1.axvline(x=proposed_cap, color='#2c3e50', linestyle='--', linewidth=2.5, label=f'Proposed Soft Cap: {proposed_cap}m')
@@ -384,7 +368,7 @@ if data_file is not None:
 
             # ECDF Plot (Cumulative)
             sns.ecdfplot(data=df_walkin, x='meal_duration_mins', color='#e74c3c', 
-                linewidth=2.5, label='Walk-in CDF', ax=ax2)
+                         linewidth=2.5, label='Walk-in CDF', ax=ax2)
             
             # ขีดเส้น Proposed Cap และหาค่า Percentile
             percentile_at_cap = (df_walkin['meal_duration_mins'] <= proposed_cap).mean() * 100
@@ -399,7 +383,7 @@ if data_file is not None:
 
             # ข้อความอธิบาย
             ax2.text(proposed_cap + 3, (percentile_at_cap / 100) - 0.07, 
-                f'~{percentile_at_cap:.1f}% of Walk-in\nFinish within {proposed_cap}m', fontsize=10)
+                     f'~{percentile_at_cap:.1f}% of Walk-in\nFinish within {proposed_cap}m', fontsize=10)
 
             # ตกแต่งกราฟ
             ax2.set_xlim(0, 180)
@@ -438,7 +422,7 @@ if data_file is not None:
 
             fig3, ax3 = plt.subplots(figsize=(10, 5))
             sns.heatmap(df_heat, annot=True, cmap="YlGnBu", cbar=False, 
-                fmt='g', linewidths=2, ax=ax3, annot_kws={"fontsize":12, "weight": "bold"})
+                        fmt='g', linewidths=2, ax=ax3, annot_kws={"fontsize":12, "weight": "bold"})
             
             # ตกแต่ง
             ax3.set_title('Operational Comparison Score (Higher is Better)', fontsize=14, pad=15)
