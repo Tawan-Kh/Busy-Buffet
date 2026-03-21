@@ -1,3 +1,10 @@
+"""
+🍽️ Busy Buffet Analytics Dashboard
+====================================
+ระบบวิเคราะห์ข้อมูลลูกค้า การรอคิว และระยะเวลาทานอาหาร
+รวม: Queue Analysis + Cap Time Analysis + Action Plan (90-min Soft Cap)
+"""
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -5,434 +12,584 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import plotly.express as px
 import plotly.graph_objects as go
-import os
 
-st.set_page_config(page_title="Busy Buffet Analytics", layout="wide")
-st.title("🍽️ Busy Buffet Analytics Dashboard")
+# ─────────────────────────────────────────────
+# CONFIG
+# ─────────────────────────────────────────────
+st.set_page_config(
+    page_title="Busy Buffet Analytics",
+    page_icon="🍽️",
+    layout="wide",
+)
 
-@st.cache_data
-def load_real_data():
-    # ค้นหาไฟล์ CSV ที่เกี่ยวข้องในโฟลเดอร์ปัจจุบัน
-    files = [f for f in os.listdir('.') if f.endswith('.csv') and any(x in f for x in ['133', '143', '153', '173', '183'])]
-    
-    df_list = []
-    for file in files:
-        try:
-            temp_df = pd.read_csv(file)
-            # คลีนชื่อคอลัมน์ (บางไฟล์มี . ต่อท้าย บางไฟล์ไม่มี)
-            temp_df.columns = temp_df.columns.str.replace('.', '', regex=False).str.strip()
-            
-            if 'meal_start' in temp_df.columns and 'meal_end' in temp_df.columns:
-                temp_df['date_ref'] = file.split(' - ')[-1].replace('.csv', '')
-                df_list.append(temp_df)
-        except Exception as e:
-            pass
+EXPECTED_COLS = ["service_no.", "pax", "queue_start", "queue_end",
+                 "table_no.", "meal_start", "meal_end", "Guest_type"]
+TIME_COLS     = ["queue_start", "queue_end", "meal_start", "meal_end"]
+VALID_GUEST   = ["Walk In", "In House"]
 
-    if not df_list:
-        st.error("❌ ไม่พบไฟล์ข้อมูล 133, 143, 153, 173, 183.csv ในโฟลเดอร์นี้ กรุณาตรวจสอบตำแหน่งไฟล์")
-        return pd.DataFrame()
+sns.set_theme(style="whitegrid")
 
-    df = pd.concat(df_list, ignore_index=True)
 
-    # คลีนข้อมูล Guest_type ป้องกันเว้นวรรคแปลกๆ
-    df['Guest_type'] = df['Guest_type'].astype(str).str.strip()
-    
-    # ลบแถวที่ไม่มีข้อมูลเวลา
-    df = df.dropna(subset=['meal_start', 'meal_end']).copy()
+# ─────────────────────────────────────────────
+# HELPER FUNCTIONS
+# ─────────────────────────────────────────────
 
-    # แปลงเวลาและคำนวณ Duration (นาที)
-    df['start_td'] = pd.to_timedelta(df['meal_start'])
-    df['end_td'] = pd.to_timedelta(df['meal_end'])
-    df['meal_duration_mins'] = (df['end_td'] - df['start_td']).dt.total_seconds() / 60
-    
-    # จัดการกรณีเวลาข้ามวัน
-    df.loc[df['meal_duration_mins'] < 0, 'meal_duration_mins'] += 24 * 60
-    
-    # ดึงชั่วโมงที่เริ่มกินเพื่อใช้วิเคราะห์ช่วงพีค
-    df['arrival_hour'] = df['start_td'].dt.components['hours']
-
+def parse_time_cols(df: pd.DataFrame, cols: list) -> pd.DataFrame:
+    """แปลงคอลัมน์เวลาเป็น datetime (format HH:MM:SS)."""
+    for col in cols:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], format="%H:%M:%S", errors="coerce")
     return df
 
-uploaded_file = st.file_uploader("อัปโหลดไฟล์ Excel หรือ CSV", type=['xlsx', 'csv'])
 
-if uploaded_file is not None:
-    file_ext = uploaded_file.name.split('.')[-1].lower()
-    if file_ext == 'csv':
-        all_sheets = {'Sheet1': pd.read_csv(uploaded_file)}
+def compute_derived_cols(df: pd.DataFrame) -> pd.DataFrame:
+    """คำนวณ wait_time, meal_duration, walk_away, seated."""
+    if "queue_start" in df.columns and "queue_end" in df.columns:
+        df["wait_time_mins"] = (
+            (df["queue_end"] - df["queue_start"]).dt.total_seconds() / 60
+        )
+    if "meal_start" in df.columns and "meal_end" in df.columns:
+        df["meal_duration_mins"] = (
+            (df["meal_end"] - df["meal_start"]).dt.total_seconds() / 60
+        )
+        # แก้ midnight rollover
+        df.loc[df["meal_duration_mins"] < 0, "meal_duration_mins"] += 24 * 60
+
+    df["walk_away"] = df["queue_start"].notna() & df["meal_start"].isna()
+    df["seated"]    = df["meal_start"].notna()
+    return df
+
+
+def load_uploaded_file(uploaded_file) -> pd.DataFrame:
+    """
+    โหลดไฟล์ Excel (multi-sheet) หรือ CSV แล้วรวมเป็น DataFrame เดียว
+    พร้อมคอลัมน์ 'Day' = ชื่อ sheet / 'Sheet1'
+    """
+    ext = uploaded_file.name.split(".")[-1].lower()
+
+    if ext == "csv":
+        sheets = {"Sheet1": pd.read_csv(uploaded_file)}
     else:
-        all_sheets = pd.read_excel(uploaded_file, sheet_name=None)
-    cols = ['service_no.', 'pax', 'queue_start', 'queue_end', 'table_no.', 'meal_start', 'meal_end', 'Guest_type']
+        sheets = pd.read_excel(uploaded_file, sheet_name=None)
+
     dfs = []
-    for sheet_name, df_temp in all_sheets.items():
-        use_cols = [c for c in cols if c in df_temp.columns]
-        df_temp = df_temp[use_cols].copy()
-        df_temp['Day'] = sheet_name
-        if 'Guest_type' in df_temp.columns:
-            df_temp['Guest_type'] = df_temp['Guest_type'].astype(str).str.strip().str.title()
-            df_temp = df_temp[df_temp['Guest_type'].isin(['Walk In', 'In House'])]
-        time_cols = ['queue_start', 'queue_end', 'meal_start', 'meal_end']
-        for col in time_cols:
-            if col in df_temp.columns:
-                df_temp[col] = pd.to_datetime(df_temp[col], format='%H:%M:%S', errors='coerce')
-        df_temp['wait_time_mins'] = (df_temp['queue_end'] - df_temp['queue_start']).dt.total_seconds() / 60
-        df_temp['meal_duration_mins'] = (df_temp['meal_end'] - df_temp['meal_start']).dt.total_seconds() / 60
-        df_temp.loc[df_temp['meal_duration_mins'] < 0, 'meal_duration_mins'] += 24 * 60 
-        df_temp['walk_away'] = df_temp['queue_start'].notna() & df_temp['meal_start'].isna()
-        df_temp['seated'] = df_temp['meal_start'].notna()
-        dfs.append(df_temp)
+    for sheet_name, raw in sheets.items():
+        # เลือกเฉพาะคอลัมน์ที่มี
+        use_cols = [c for c in EXPECTED_COLS if c in raw.columns]
+        df = raw[use_cols].copy()
+        df["Day"] = sheet_name
+
+        # กรองประเภทลูกค้า
+        if "Guest_type" in df.columns:
+            df["Guest_type"] = (
+                df["Guest_type"].astype(str).str.strip().str.title()
+            )
+            df = df[df["Guest_type"].isin(VALID_GUEST)]
+
+        df = parse_time_cols(df, TIME_COLS)
+        df = compute_derived_cols(df)
+        dfs.append(df)
+
+    if not dfs:
+        return pd.DataFrame()
+
     df_all = pd.concat(dfs, ignore_index=True)
-    df_all['meal_start_str'] = df_all['meal_start'].dt.strftime('%H:%M:%S')
-    df_all['meal_end_str'] = df_all['meal_end'].dt.strftime('%H:%M:%S')
-    tab1, tab2, tab3 = st.tabs(["Dashboard", "Cap Time Analysis", "Seating Time Optimization"])
-    with tab1:
-        st.markdown("แดชบอร์ดสรุปผลการวิเคราะห์ข้อมูลลูกค้า การรอคิว และระยะเวลาทานอาหาร")
-        all_sheets = {day: group for day, group in df_all.groupby('Day')}
-        cols = ['service_no.', 'pax', 'queue_start', 'queue_end', 'table_no.', 'meal_start', 'meal_end', 'Guest_type']
-        dfs = []
-        st.header("📊 Per-sheet Analytics (สรุปผลรายวัน)")
-        
-        for sheet_name, df_temp in all_sheets.items():
-            use_cols = [c for c in cols if c in df_temp.columns]
-            df_temp = df_temp[use_cols].copy()
-            if 'Guest_type' in df_temp.columns:
-                df_temp['Guest_type'] = df_temp['Guest_type'].astype(str).str.strip().str.title()
-                df_temp = df_temp[df_temp['Guest_type'].isin(['Walk In', 'In House'])]
-            time_cols = ['queue_start', 'queue_end', 'meal_start', 'meal_end']
-            for col in time_cols:
-                if col in df_temp.columns:
-                    df_temp[col] = pd.to_datetime(df_temp[col], errors='coerce')
-            df_temp['wait_time_mins'] = (df_temp['queue_end'] - df_temp['queue_start']).dt.total_seconds() / 60
-            df_temp['meal_duration_mins'] = (df_temp['meal_end'] - df_temp['meal_start']).dt.total_seconds() / 60
-            df_temp.loc[df_temp['meal_duration_mins'] < 0, 'meal_duration_mins'] += 24 * 60 
-            df_temp['walk_away'] = df_temp['queue_start'].notna() & df_temp['meal_start'].isna()
-            df_temp['seated'] = df_temp['meal_start'].notna()
-            total_pax = df_temp['pax'].sum()
-            total_groups = len(df_temp)
-            walk_aways = df_temp['walk_away'].sum()
-            avg_wait = df_temp[df_temp['wait_time_mins'] > 0]['wait_time_mins'].mean()
-            st.subheader(f"📅 ข้อมูลชีต: {sheet_name}")
-            col1, col2, col3 = st.columns(3)
-            col1.metric("จำนวนลูกค้าทั้งหมด", f"{total_pax:.0f} คน", f"{total_groups} กลุ่ม")
-            col2.metric("กลุ่มที่ทิ้งคิว (Walk-away)", f"{walk_aways} กลุ่ม")
-            if pd.notna(avg_wait):
-                col3.metric("เวลารอคิวเฉลี่ย", f"{avg_wait:.2f} นาที")
+    # เก็บเวลาเป็น string สำหรับ Cap Time tab
+    df_all["meal_start_str"] = df_all["meal_start"].dt.strftime("%H:%M:%S")
+    df_all["meal_end_str"]   = df_all["meal_end"].dt.strftime("%H:%M:%S")
+    return df_all
+
+
+def count_active(df: pd.DataFrame, start_col: str, end_col: str,
+                 time_range) -> pd.DataFrame:
+    """นับจำนวนโต๊ะที่ active ทีละนาที."""
+    counts = [
+        ((df[start_col] <= t) & (df[end_col] > t)).sum()
+        for t in time_range
+    ]
+    return pd.DataFrame({"Time": time_range, "Active": counts})
+
+
+# ─────────────────────────────────────────────
+# UI HEADER
+# ─────────────────────────────────────────────
+st.title("🍽️ Busy Buffet Analytics Dashboard")
+st.caption("วิเคราะห์คิว • ระยะเวลาทานอาหาร • แผนปฏิบัติการ")
+
+uploaded_file = st.file_uploader(
+    "📂 อัปโหลดไฟล์ Excel หรือ CSV", type=["xlsx", "csv"]
+)
+
+if uploaded_file is None:
+    st.info("💡 กรุณาอัปโหลดไฟล์ Excel Dataset เพื่อเริ่มต้นใช้งานแดชบอร์ด")
+    st.stop()
+
+
+# ─────────────────────────────────────────────
+# LOAD DATA
+# ─────────────────────────────────────────────
+df_all = load_uploaded_file(uploaded_file)
+
+if df_all.empty:
+    st.error("❌ ไม่พบข้อมูลที่ใช้ได้ กรุณาตรวจสอบชื่อคอลัมน์และประเภทข้อมูล")
+    st.stop()
+
+
+# ─────────────────────────────────────────────
+# TABS
+# ─────────────────────────────────────────────
+tab1, tab2, tab3 = st.tabs([
+    "📊 Dashboard",
+    "⏱️ Cap Time Analysis",
+    "🎯 Action Plan (90-min Soft Cap)",
+])
+
+
+# ══════════════════════════════════════════════
+# TAB 1 — DASHBOARD
+# ══════════════════════════════════════════════
+with tab1:
+    st.markdown("แดชบอร์ดสรุปผลการวิเคราะห์ข้อมูลลูกค้า การรอคิว และระยะเวลาทานอาหาร")
+
+    # ── Per-Sheet Summary ──────────────────────
+    st.header("📋 สรุปผลรายวัน (Per-Sheet Summary)")
+    for day, grp in df_all.groupby("Day"):
+        total_pax    = grp["pax"].sum() if "pax" in grp.columns else 0
+        total_groups = len(grp)
+        walk_aways   = grp["walk_away"].sum()
+        avg_wait     = grp.loc[grp["wait_time_mins"] > 0, "wait_time_mins"].mean()
+
+        st.subheader(f"📅 {day}")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("ลูกค้าทั้งหมด", f"{total_pax:.0f} คน", f"{total_groups} กลุ่ม")
+        c2.metric("Walk-away (กลุ่มที่ทิ้งคิว)", f"{walk_aways} กลุ่ม")
+        c3.metric(
+            "เวลารอคิวเฉลี่ย",
+            f"{avg_wait:.2f} นาที" if pd.notna(avg_wait) else "ไม่มีการรอคิว",
+        )
+        st.divider()
+
+    # ── Chart 1: Queue Performance ─────────────
+    st.header("📈 Queue Management & Customer Behavior Analytics")
+    st.subheader("1. Queue Performance & Customer Attrition")
+
+    fig1, (ax1a, ax1b) = plt.subplots(1, 2, figsize=(14, 5))
+
+    sns.boxplot(
+        data=df_all[df_all["wait_time_mins"] > 0],
+        x="Guest_type", y="wait_time_mins",
+        palette="Set2", ax=ax1a,
+    )
+    ax1a.set_title("1.1 Overall Wait Time (In-house vs Walk-in)")
+    ax1a.set_ylabel("Wait Time (Minutes)")
+
+    walk_counts = df_all[df_all["walk_away"]]["Guest_type"].value_counts()
+    if not walk_counts.empty:
+        sns.barplot(x=walk_counts.index, y=walk_counts.values,
+                    palette="Reds", ax=ax1b)
+    else:
+        ax1b.text(0.5, 0.5, "No Walk-aways", ha="center", va="center")
+    ax1b.set_title("1.2 Overall Walk-aways by Guest Type")
+    ax1b.set_ylabel("Total Walk-aways (Groups)")
+
+    plt.tight_layout()
+    st.pyplot(fig1)
+
+    # ── Chart 2: Daily Guest Volume ────────────
+    st.subheader("2. Daily Guest Volume & Peak Demand")
+
+    daily_pax = df_all.groupby(["Day", "Guest_type"])["pax"].sum().reset_index()
+    fig2, ax2 = plt.subplots(figsize=(10, 5))
+    sns.barplot(data=daily_pax, x="Day", y="pax", hue="Guest_type",
+                palette="viridis", ax=ax2)
+    ax2.set_title("2. Total Guests (Pax) Across Days")
+    ax2.set_ylabel("Total Guests (Pax)")
+    ax2.set_xlabel("Day (Sheet Name)")
+    plt.tight_layout()
+    st.pyplot(fig2)
+
+    # ── Chart 3: Meal Duration ─────────────────
+    st.subheader("3. Meal Duration & Table Occupancy")
+
+    df_meal = df_all[df_all["seated"]].copy()
+    cap_99  = df_meal["meal_duration_mins"].quantile(0.99)
+    df_meal = df_meal[df_meal["meal_duration_mins"] <= cap_99]
+
+    fig3, (ax3a, ax3b) = plt.subplots(1, 2, figsize=(14, 5))
+
+    sns.histplot(data=df_meal, x="meal_duration_mins", hue="Guest_type",
+                 kde=True, bins=20, palette="Set1", alpha=0.6, ax=ax3a)
+    ax3a.set_title("3.1 Meal Duration Distribution (Outliers Trimmed 99th pct)")
+    ax3a.set_xlabel("Meal Duration (Minutes)")
+
+    sns.violinplot(data=df_meal, x="Guest_type", y="meal_duration_mins",
+                   palette="Set1", inner=None, ax=ax3b)
+    sns.stripplot(data=df_meal, x="Guest_type", y="meal_duration_mins",
+                  color="k", size=3, alpha=0.45, jitter=0.15, ax=ax3b)
+    ax3b.set_title("3.2 Meal Duration Spread (Outliers Trimmed 99th pct)")
+    ax3b.set_ylabel("Meal Duration (Minutes)")
+
+    plt.tight_layout()
+    st.pyplot(fig3)
+
+    st.markdown("**สถิติการทานอาหาร (หลังกรอง 99th percentile)**")
+    st.dataframe(
+        df_meal.groupby("Guest_type")["meal_duration_mins"]
+        .agg(["count", "mean", "median", "std"]).round(2)
+    )
+
+    # ── Overall Stats ──────────────────────────
+    st.header("📌 สถิติภาพรวม")
+    st.write("**ระยะเวลาทานอาหารเฉลี่ย (นาที) แยกตามประเภทลูกค้า:**")
+    st.dataframe(
+        df_all[df_all["seated"]].groupby("Guest_type")["meal_duration_mins"]
+        .mean().round(2)
+    )
+
+
+# ══════════════════════════════════════════════
+# TAB 2 — CAP TIME ANALYSIS
+# ══════════════════════════════════════════════
+with tab2:
+    # แปลงเวลากลับจาก string เพื่อใช้ใน simulation
+    df_cap = df_all.copy()
+    df_cap["meal_start_dt"] = pd.to_datetime(
+        df_cap["meal_start_str"], format="%H:%M:%S", errors="coerce"
+    )
+    df_cap["meal_end_dt"] = pd.to_datetime(
+        df_cap["meal_end_str"], format="%H:%M:%S", errors="coerce"
+    )
+    df_cap["actual_duration_mins"] = (
+        (df_cap["meal_end_dt"] - df_cap["meal_start_dt"]).dt.total_seconds() / 60
+    )
+    df_seated = df_cap.dropna(subset=["actual_duration_mins"]).copy()
+
+    median_dur     = df_seated["actual_duration_mins"].median()
+    pct_under_120  = (df_seated["actual_duration_mins"] <= 120).mean() * 100
+    pct_under_180  = (df_seated["actual_duration_mins"] <= 180).mean() * 100
+
+    # ── Section A: ทำไม Cap ไม่เวิร์ก ────────────
+    st.header("แนวทางที่ 1: ทำไมการลดเวลา (Cap Seating Time) ถึงไม่เวิร์ก?")
+    st.markdown(
+        "การจำกัดเวลาจาก 5 ชั่วโมง เหลือ 2-3 ชั่วโมง "
+        "**ไม่กระทบพฤติกรรมจริงของลูกค้า** และไม่ได้ช่วยแก้ปัญหาช่วงคิวพีก"
+    )
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Median เวลากินจริง",      f"{median_dur:.0f} นาที")
+    c2.metric("กินจบภายใน 120 นาที",    f"{pct_under_120:.1f}%")
+    c3.metric("กินจบภายใน 180 นาที",    f"{pct_under_180:.1f}%")
+    st.divider()
+
+    # กราฟ 1: Histogram + vline Cap 120
+    st.subheader("1. ลูกค้าส่วนใหญ่ใช้เวลาทานเท่าไหร่?")
+    fig_hist = px.histogram(
+        df_seated, x="actual_duration_mins", nbins=40,
+        title="การกระจายตัวของเวลานั่งทานจริง",
+        labels={"actual_duration_mins": "ระยะเวลาที่นั่งทาน (นาที)", "count": "จำนวนโต๊ะ"},
+        color_discrete_sequence=["#1f77b4"],
+    )
+    fig_hist.add_vline(
+        x=120, line_width=3, line_dash="dash", line_color="red",
+        annotation_text=" Cap 120 นาที (กระทบลูกค้าน้อยมาก)",
+        annotation_position="top right",
+    )
+    st.plotly_chart(fig_hist, use_container_width=True)
+    st.divider()
+
+    # กราฟ 2: Simulation Actual vs Cap 120
+    st.subheader("2. จำลองสถานการณ์: ถ้าบังคับออกตอน 120 นาที โต๊ะจะว่างขึ้นไหม?")
+    st.markdown(
+        "เปรียบเทียบยอดการใช้โต๊ะรายนาที ระหว่างเวลาจริง "
+        "กับกรณีที่บังคับให้ลูกค้าลุกเมื่อครบ 120 นาที"
+    )
+
+    time_range_cap = pd.date_range("1900-01-01 06:00:00", "1900-01-01 12:00:00", freq="1min")
+
+    # simulated end
+    df_seated["sim_end_120"] = df_seated.apply(
+        lambda r: (
+            r["meal_start_dt"] + pd.Timedelta(minutes=120)
+            if r["actual_duration_mins"] > 120
+            else r["meal_end_dt"]
+        ),
+        axis=1,
+    )
+
+    actual_active = count_active(df_seated, "meal_start_dt", "meal_end_dt",    time_range_cap)
+    sim_active    = count_active(df_seated, "meal_start_dt", "sim_end_120",    time_range_cap)
+
+    fig_sim = go.Figure()
+    fig_sim.add_trace(go.Scatter(
+        x=actual_active["Time"].dt.time, y=actual_active["Active"],
+        mode="lines", name="ยอดใช้โต๊ะจริง", line=dict(color="blue", width=3),
+    ))
+    fig_sim.add_trace(go.Scatter(
+        x=sim_active["Time"].dt.time, y=sim_active["Active"],
+        mode="lines", name="จำลอง Cap 120 นาที",
+        line=dict(color="red", width=3, dash="dash"),
+    ))
+    fig_sim.update_layout(
+        title="เปรียบเทียบยอดการใช้โต๊ะ (Actual vs 120-min Cap Simulation)",
+        xaxis_title="เวลา", yaxis_title="จำนวนโต๊ะที่มีคนนั่ง",
+        hovermode="x unified",
+    )
+    st.plotly_chart(fig_sim, use_container_width=True)
+    st.info(
+        "**ข้อสรุป:** ปัญหาแท้จริงคือ **Arrival Bunching** (คนแห่มาพร้อมกัน) "
+        "ในช่วงพีก (08:00-09:30) เส้นสีแดงและสีน้ำเงินทับกัน "
+        "→ การ Cap 120 นาที ไม่ได้คืนโต๊ะในช่วงวิกฤตเลย"
+    )
+
+    # ── Section B: ขึ้นราคา 259 ──────────────────
+    st.header("แนวทางที่ 2: ขึ้นราคา 259 บาท 'ทุกวัน' เวิร์กไหม?")
+    st.markdown(
+        "การขึ้นราคาแบบเหมารวม **ไม่ใช่ทางแก้ที่ถูกต้อง** "
+        "เพราะปัญหาคิวไม่ได้เกิดขึ้นตลอดเวลา"
+    )
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("เวลาที่มีคิวเทียบกับเวลาทั้งหมด", "10.8%",    "293 จาก 2,705 นาที",    delta_color="off")
+    c2.metric("จำนวนวันที่มีคิว",                 "2 จาก 5 วัน", "เฉพาะชีต 143, 153",   delta_color="off")
+    c3.metric("ช่วงเวลาคิวพีกสุด",               "08:00-11:00", "หนักสุด 09:00-10:00", delta_color="off")
+    st.divider()
+
+    # กราฟ: Queue per day
+    st.subheader("1. ปัญหาคิวไม่ได้เกิดขึ้นทุกวัน")
+    df_q = df_all.dropna(subset=["queue_start", "queue_end"]).copy()
+    day_counts = df_q.groupby("Day").size().reset_index(name="Queue_Groups")
+    all_days   = pd.DataFrame({"Day": df_all["Day"].unique()})
+    day_counts = pd.merge(all_days, day_counts, on="Day", how="left").fillna(0)
+    day_counts["Color"] = day_counts["Queue_Groups"].apply(
+        lambda x: "#e74c3c" if x > 0 else "#d3d3d3"
+    )
+    fig_day = go.Figure(data=[go.Bar(
+        x=day_counts["Day"], y=day_counts["Queue_Groups"],
+        marker_color=day_counts["Color"],
+        text=day_counts["Queue_Groups"], textposition="auto",
+    )])
+    fig_day.update_layout(
+        title="จำนวนกลุ่มลูกค้าที่ต้องรอคิว แยกตามวัน",
+        xaxis_title="วัน (Sheet)", yaxis_title="จำนวนกลุ่มที่รอคิว",
+    )
+    st.plotly_chart(fig_day, use_container_width=True)
+
+    # กราฟ: Queue density by time
+    st.subheader("2. ปัญหาคิวไม่ได้เกิดทั้งวัน (กระจุกตัวช่วงสาย)")
+    df_q["q_start_dt"] = pd.to_datetime(
+        "2026-01-01 " + df_q["queue_start"].astype(str), errors="coerce"
+    ).dt.tz_localize(None)
+    df_q["q_end_dt"] = pd.to_datetime(
+        "2026-01-01 " + df_q["queue_end"].astype(str), errors="coerce"
+    ).dt.tz_localize(None)
+
+    time_range_q = pd.date_range("2026-01-01 06:00:00", "2026-01-01 12:00:00", freq="1min")
+    q_density = [
+        (
+            (df_q["q_start_dt"].notna()) &
+            (df_q["q_start_dt"] <= t) &
+            (df_q["q_end_dt"].notna()) &
+            (df_q["q_end_dt"] > t)
+        ).sum()
+        for t in time_range_q
+    ]
+    fig_density = px.area(
+        x=time_range_q, y=q_density,
+        labels={"x": "เวลา", "y": "จำนวนกลุ่มที่ยืนรอคิว"},
+        title="ความหนาแน่นของคิวรายนาที (รวมทุกวัน)",
+    )
+    fig_density.update_traces(line_color="#e74c3c", fillcolor="rgba(231,76,60,0.4)")
+    fig_density.update_layout(xaxis_tickformat="%H:%M")
+    fig_density.add_vrect(
+        x0="2026-01-01 08:00:00", x1="2026-01-01 11:00:00",
+        fillcolor="yellow", opacity=0.2, layer="below", line_width=0,
+        annotation_text="Peak Period (08:00-11:00)", annotation_position="top left",
+    )
+    st.plotly_chart(fig_density, use_container_width=True)
+    st.info(
+        "**ข้อสรุป:** หากจะใช้ราคาแก้ปัญหา ต้องเป็น **Targeted Pricing** เช่น "
+        "Early Bird Discount ช่วง 06:00-07:30 เพื่อกระจาย Demand "
+        "ไม่ใช่ขึ้นราคาเหมาทุกวัน"
+    )
+
+    # ── Section C: Queue Skipping ─────────────────
+    st.header("แนวทางที่ 3: ให้สิทธิ์ In-house แซงคิว (Queue Skipping)")
+    st.markdown(
+        "นโยบายนี้แก้ปัญหา **ผิดจุด** เพราะเป็นการจัดการความรู้สึก "
+        "ไม่ใช่การเพิ่ม Capacity — ไม่มีโต๊ะว่างให้นั่งอยู่ดี"
+    )
+
+    c1, c2 = st.columns(2)
+    c1.metric("คิวเฉลี่ยช่วงพีก (Day 153)", "10.6 กลุ่ม", "Walk-in 7.8 | In-house 2.9", delta_color="off")
+    c2.metric("โต๊ะที่ถูกใช้ ณ จุด Peak",  "24 ยูนิต",   "Walk-in 18 | In-house 6",    delta_color="off")
+    st.divider()
+
+    df_153 = df_all[df_all["Day"] == "153"].copy()
+    df_153["Guest_type"] = (
+        df_153["Guest_type"].astype(str).str.strip().str.title()
+        .replace({"Walk In": "Walk-in", "In House": "In-house"})
+    )
+
+    for col_src, col_dst in [("queue_start", "q_start"), ("queue_end", "q_end"),
+                              ("meal_start",  "m_start"), ("meal_end",  "m_end")]:
+        df_153[col_dst] = pd.to_datetime(
+            "2026-01-01 " + df_153[col_src].astype(str), errors="coerce"
+        ).dt.tz_localize(None)
+
+    time_range_153 = pd.date_range("2026-01-01 07:00:00", "2026-01-01 11:30:00", freq="1min")
+    seat_data = [
+        {
+            "Time": t,
+            "Walk-in":   ((df_153["Guest_type"] == "Walk-in")   & (df_153["m_start"] <= t) & (df_153["m_end"] > t)).sum(),
+            "In-house":  ((df_153["Guest_type"] == "In-house")  & (df_153["m_start"] <= t) & (df_153["m_end"] > t)).sum(),
+        }
+        for t in time_range_153
+    ]
+    df_seat = pd.DataFrame(seat_data)
+
+    st.subheader("กราฟจำนวนโต๊ะที่ถูกใช้งาน (Day 153)")
+    fig_seat = go.Figure()
+    fig_seat.add_trace(go.Scatter(
+        x=df_seat["Time"], y=df_seat["In-house"],
+        mode="lines", stackgroup="one", name="In-house (แขกโรงแรม)",
+        fillcolor="#2ecc71", line=dict(color="#27ae60"),
+    ))
+    fig_seat.add_trace(go.Scatter(
+        x=df_seat["Time"], y=df_seat["Walk-in"],
+        mode="lines", stackgroup="one", name="Walk-in (ลูกค้าภายนอก)",
+        fillcolor="#3498db", line=dict(color="#2980b9"),
+    ))
+    fig_seat.add_hline(
+        y=24, line_dash="dash", line_color="red",
+        annotation_text="Max Capacity (~24 Tables)", annotation_position="top left",
+    )
+    fig_seat.update_layout(
+        xaxis_tickformat="%H:%M",
+        yaxis_title="จำนวนโต๊ะที่กำลังใช้งาน",
+        hovermode="x unified",
+    )
+    st.plotly_chart(fig_seat, use_container_width=True)
+    st.error(
+        "**บทสรุป:** Queue Skipping ไม่ใช่ Capacity Solution — แค่ย้ายความเจ็บปวดไปรวมที่ Walk-in "
+        "ซึ่งจะดันยอด Walk-away ให้พุ่งขึ้น วิธีที่ถูกคือ Table Management "
+        "หรือ Dynamic Pricing เพื่อลด Arrival Bunching"
+    )
+
+
+# ══════════════════════════════════════════════
+# TAB 3 — ACTION PLAN (90-min Soft Cap)
+# ══════════════════════════════════════════════
+with tab3:
+    st.header("🎯 Action Plan: Walk-in 90-Minute Soft Cap")
+    st.markdown("### ข้อเสนอแนะที่ถูกต้องตามข้อมูล (Data-Driven Recommendation)")
+
+    # Sidebar slider
+    proposed_cap = st.slider(
+        "⚙️ ตั้งเวลา Soft Cap สำหรับ Walk-in (นาที):",
+        min_value=60, max_value=150, value=90, step=15,
+    )
+
+    st.info(
+        f"**📝 กติกาการบังคับใช้ ({proposed_cap}-min Soft Cap)**  \n"
+        "1. **Target:** เฉพาะ Walk-in เท่านั้น  \n"
+        f"2. **Timing:** บังคับใช้เฉพาะช่วงคิวพีก (คิวเกิน 5 กลุ่ม)  \n"
+        f"3. **Execution:** เตือนล่วงหน้าที่นาทีที่ {proposed_cap - 15}, "
+        f"ขอคืนโต๊ะนาทีที่ {proposed_cap}"
+    )
+
+    # ── Data Prep ──────────────────────────────
+    df_walkin  = df_all[df_all["Guest_type"] == "Walk In"].copy()
+    df_inhouse = df_all[df_all["Guest_type"] == "In House"].copy()
+
+    w_mean, w_med = df_walkin["meal_duration_mins"].mean(),  df_walkin["meal_duration_mins"].median()
+    i_mean, i_med = df_inhouse["meal_duration_mins"].mean(), df_inhouse["meal_duration_mins"].median()
+    impacted_pct  = (df_walkin["meal_duration_mins"] > proposed_cap).mean() * 100
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Avg Walk-in Duration",   f"{w_mean:.1f} นาที")
+    c2.metric("Avg In-house Duration",  f"{i_mean:.1f} นาที")
+    c3.metric(
+        f"Walk-ins ที่ได้รับผลกระทบจาก {proposed_cap}m cap",
+        f"{impacted_pct:.1f}%",
+        delta="กลุ่มเป้าหมาย", delta_color="inverse",
+    )
+    st.divider()
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown("#### 1️⃣ กราฟพิสูจน์ปัญหา (KDE Distribution)")
+        st.caption("Walk-in มีหางยาว (Long-stay) แย่ง Capacity จาก In-house")
+
+        fig_kde, ax_kde = plt.subplots(figsize=(8, 5))
+        sns.kdeplot(data=df_inhouse, x="meal_duration_mins",
+                    fill=True, color="#3498db", label=f"In-house (Med: {i_med:.0f}m)", ax=ax_kde)
+        sns.kdeplot(data=df_walkin,  x="meal_duration_mins",
+                    fill=True, color="#e74c3c", label=f"Walk-in (Med: {w_med:.0f}m)", ax=ax_kde)
+        ax_kde.axvline(proposed_cap, color="black", linestyle="--", linewidth=2,
+                       label=f"Soft Cap: {proposed_cap}m")
+        ax_kde.set_xlim(0, 300)
+        ax_kde.set_xlabel("Meal Duration (Minutes)")
+        ax_kde.legend()
+        st.pyplot(fig_kde)
+
+    with col2:
+        st.markdown(f"#### 2️⃣ ลูกค้าที่นั่งเกิน {proposed_cap} นาที เข้ามาตอนกี่โมง?")
+        st.caption("พิสูจน์ว่าการ Cap คืน Capacity ตรงช่วง Peak ได้จริง")
+
+        if "meal_start" in df_walkin.columns:
+            df_walkin["arrival_hour"] = df_walkin["meal_start"].dt.hour
+            df_long  = df_walkin[df_walkin["meal_duration_mins"] > proposed_cap]
+            long_cnt = df_long.groupby("arrival_hour").size().reset_index(name="count")
+
+            fig_arr, ax_arr = plt.subplots(figsize=(8, 5))
+            if not long_cnt.empty:
+                sns.barplot(data=long_cnt, x="arrival_hour", y="count",
+                            color="#e67e22", ax=ax_arr)
+                ax_arr.axvspan(-0.5, 2.5, color="red", alpha=0.1,
+                               label="Peak Queue Zone (07:00-09:00)")
+                ax_arr.set_xlabel("Arrival Hour (24h)")
+                ax_arr.set_ylabel("Long-stay Groups")
+                ax_arr.legend()
             else:
-                col3.metric("เวลารอคิวเฉลี่ย", "ไม่มีการรอคิว")
-            st.divider()
-            dfs.append(df_temp)
-        if len(dfs) == 0:
-            st.warning("ไม่พบข้อมูลที่สามารถใช้งานได้หลังจากกรองข้อมูลแล้ว กรุณาตรวจสอบคอลัมน์และประเภทข้อมูลในไฟล์ Excel")
-            st.stop()
-        st.header("📈 Queue Management & Customer Behavior Analytics")
-        sns.set_theme(style="whitegrid")
-        #Queue Performance
-        st.subheader("1. Queue Performance & Customer Attrition Analysis")
-        fig1 = plt.figure(figsize=(14, 5))
-        plt.subplot(1, 2, 1)
-        sns.boxplot(data=df_all[df_all['wait_time_mins'] > 0], x='Guest_type', y='wait_time_mins', palette='Set2')
-        plt.title('1.1 Overall Wait Time (In-house vs Walk-in)')
-        plt.ylabel('Wait Time (Minutes)')
-        plt.subplot(1, 2, 2)
-        walk_away_counts = df_all[df_all['walk_away'] == True]['Guest_type'].value_counts()
-        if not walk_away_counts.empty:
-            sns.barplot(x=walk_away_counts.index, y=walk_away_counts.values, palette='Reds')
-        else:
-            plt.text(0.5, 0.5, 'No Walk-aways', ha='center', va='center')
-        plt.title('1.2 Overall Walk-aways by Guest Type')
-        plt.ylabel('Total Walk-aways (Groups)')
-        plt.tight_layout()
-        st.pyplot(fig1)
-        #Daily Guest Volume
-        st.subheader("2. Daily Guest Volume & Peak Demand Analysis")
-        fig2 = plt.figure(figsize=(10, 5))
-        daily_pax = df_all.groupby(['Day', 'Guest_type'])['pax'].sum().reset_index()
-        sns.barplot(data=daily_pax, x='Day', y='pax', hue='Guest_type', palette='viridis')
-        plt.title('2. Total Guests (Pax) Comparison Across Days')
-        plt.ylabel('Total Guests (Pax)')
-        plt.xlabel('Day (Sheet Name)')
-        st.pyplot(fig2)
-        #Meal Duration
-        st.subheader("3. Meal Duration & Table Occupancy Dynamics")
-        df_meal = df_all[df_all['seated'] == True].copy()
-        if df_meal.empty:
-            st.warning("ไม่พบข้อมูลการทานอาหาร (seated) ในชุดข้อมูลนี้")
-        else:
-            duration_cap = df_meal['meal_duration_mins'].quantile(0.99)
-            df_meal = df_meal[df_meal['meal_duration_mins'] <= duration_cap]
+                ax_arr.text(0.5, 0.5, "ไม่มีลูกค้าที่นั่งนานเกินเวลาที่กำหนด",
+                            ha="center", va="center")
+            st.pyplot(fig_arr)
 
-            if df_meal.empty:
-                st.warning("ข้อมูลหลังตัด outlier 99th percentile ไม่มีข้อมูลพอสำหรับกราฟ")
-            else:
-                # ถ้ามีข้อมูลแค่หนึ่งค่าในกลุ่มใดกลุ่มหนึ่ง KDE จะชน error
-                group_counts = df_meal.groupby('Guest_type')['meal_duration_mins'].count()
-                kde_enabled = all(group_counts >= 2) if not group_counts.empty else False
+    st.divider()
 
-                fig3 = plt.figure(figsize=(14, 5))
-                plt.subplot(1, 2, 1)
-                sns.histplot(
-                    data=df_meal,
-                    x='meal_duration_mins',
-                    hue='Guest_type',
-                    kde=kde_enabled,
-                    bins=20,
-                    palette='Set1',
-                    alpha=0.6
-                )
-                plt.title('3.1 Meal Duration Distribution (All Days, Outliers Trimmed 99th pct)')
-                plt.xlabel('Meal Duration (Minutes)')
-                plt.ylabel('Frequency')
+    # ── Comparison Table ───────────────────────
+    st.markdown("#### 🆚 ทำไมวิธีนี้เวิร์กกว่า 2 ข้อที่เหลือ?")
+    comp_data = {
+        "Operational Criteria": [
+            "แก้ปัญหาที่ต้นเหตุ",
+            "ช่วงเวลาบังคับใช้",
+            "ผลกระทบต่อ In-house",
+            "ความยุติธรรม (Fairness)",
+        ],
+        f"✅ {proposed_cap}-min Soft Cap (เสนอ)": [
+            "ตรงจุด — ตัด Long-stay Walk-in",
+            f"เฉพาะช่วง Peak / คิวเกิน 5 กลุ่ม",
+            "ไม่กระทบเลย",
+            "อธิบายง่าย กติกาแฟร์ตั้งแต่นั่ง",
+        ],
+        "❌ ขึ้นราคา 259 บาท": [
+            "ไม่แก้ — จ่ายแพงแล้วยิ่งนั่งนาน",
+            "บังคับใช้ทั้งวัน ทุกวัน",
+            "กระทบถ้าห้องพักไม่รวมอาหาร",
+            "ลูกค้าด่า — ขึ้นราคาแก้คิว",
+        ],
+        "❌ Queue Skipping": [
+            "ไม่แก้ — แค่สลับลำดับคนรอ",
+            "ทำตอนมีคิว",
+            "ได้โต๊ะเร็วขึ้น",
+            "Walk-in รู้สึกโดนเอาเปรียบขั้นสุด",
+        ],
+    }
+    st.table(pd.DataFrame(comp_data).set_index("Operational Criteria"))
 
-                plt.subplot(1, 2, 2)
-                sns.violinplot(data=df_meal, x='Guest_type', y='meal_duration_mins', palette='Set1', inner=None)
-                sns.stripplot(data=df_meal, x='Guest_type', y='meal_duration_mins', color='k', size=3, alpha=0.45, jitter=0.15)
-                plt.title('3.2 Meal Duration Spread (All Days, Outliers Trimmed 99th pct)')
-                plt.ylabel('Meal Duration (Minutes)')
-
-                summary_stats = df_meal.groupby('Guest_type')['meal_duration_mins'].agg(['count', 'mean', 'median', 'std']).round(2)
-                st.markdown("**สถิติการทานอาหาร (หลังกรอง outliers 99th percentile)**")
-                st.dataframe(summary_stats)
-                plt.tight_layout()
-                st.pyplot(fig3)
-        st.header("📌 สถิติภาพรวม (Overall)")
-        st.write("**ระยะเวลาทานอาหารเฉลี่ย (นาที) แยกตามประเภทลูกค้า:**")
-        st.dataframe(df_all[df_all['seated'] == True].groupby('Guest_type')['meal_duration_mins'].mean().round(2))
-    with tab2:
-        df_all['meal_start_dt'] = pd.to_datetime(df_all['meal_start_str'], format='%H:%M:%S', errors='coerce')
-        df_all['meal_end_dt'] = pd.to_datetime(df_all['meal_end_str'], format='%H:%M:%S', errors='coerce')
-        df_all['actual_duration_mins'] = (df_all['meal_end_dt'] - df_all['meal_start_dt']).dt.total_seconds() / 60
-        df_seated = df_all.dropna(subset=['actual_duration_mins']).copy()
-        median_duration = df_seated['actual_duration_mins'].median()
-        pct_under_120 = (df_seated['actual_duration_mins'] <= 120).mean() * 100
-        pct_under_180 = (df_seated['actual_duration_mins'] <= 180).mean() * 100
-        st.header("แนวทางที่1: ทำไมการลดเวลา (Cap Seating Time) ถึงไม่เวิร์ก?")
-        st.markdown("การจำกัดเวลาจาก 5 ชั่วโมง เหลือ 2-3 ชั่วโมง **ไม่กระทบพฤติกรรมจริงของลูกค้า** และไม่ได้ช่วยแก้ปัญหาช่วงคิวพีก")
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Median เวลากินจริง", f"{median_duration:.0f} นาที")
-        col2.metric("กินจบภายใน 120 นาที", f"{pct_under_120:.1f}%")
-        col3.metric("กินจบภายใน 180 นาที", f"{pct_under_180:.1f}%")
-        st.divider()
-        #กราฟที่: การกระจายตัวของเวลา (Histogram + Cumulative) 
-        st.subheader("1. ลูกค้าส่วนใหญ่ใช้เวลาทานเท่าไหร่?")
-        fig1 = px.histogram(
-            df_seated, 
-            x="actual_duration_mins", 
-            nbins=40,
-            title="การกระจายตัวของเวลานั่งทานจริง (Meal Duration)",
-            labels={'actual_duration_mins': 'ระยะเวลาที่นั่งทาน (นาที)', 'count': 'จำนวนโต๊ะ'},
-            color_discrete_sequence=['#1f77b4']
-        )
-        fig1.add_vline(x=120, line_width=3, line_dash="dash", line_color="red", 
-            annotation_text=" Cap 120 นาที (กระทบลูกค้าน้อยมาก)", annotation_position="top right")
-        st.plotly_chart(fig1, use_container_width=True)
-        st.divider()
-        #กราฟที่: Simulation จำลองการตัดเวลาช่วง Peak (Arrival Bunching)
-        st.subheader("2. จำลองสถานการณ์: ถ้าบังคับออกตอน 120 นาที โต๊ะจะว่างขึ้นไหม?")
-        st.markdown("เราจะจำลองยอดการใช้โต๊ะรายนาที (Minute-by-minute) โดยเปรียบเทียบเวลาทานจริง กับ กรณีที่เราบังคับให้ลูกค้าลุกเมื่อครบ 120 นาที")
-        def get_active_tables(df, end_col):
-            time_range = pd.date_range("1900-01-01 06:00:00", "1900-01-01 12:00:00", freq="1min")
-            active_counts = []
-            
-            for t in time_range:
-                count = ((df['meal_start_dt'] <= t) & (df[end_col] > t)).sum()
-                active_counts.append(count)
-            return pd.DataFrame({'Time': time_range.time, 'Active_Tables': active_counts})
-
-        df_seated['simulated_end_120'] = df_seated.apply(
-            lambda row: row['meal_start_dt'] + pd.Timedelta(minutes=120) 
-            if row['actual_duration_mins'] > 120 
-            else row['meal_end_dt'], 
-            axis=1
-        )
-
-        df_actual_active = get_active_tables(df_seated, 'meal_end_dt')
-        df_simulated_active = get_active_tables(df_seated, 'simulated_end_120')
-        fig2 = go.Figure()
-        fig2.add_trace(go.Scatter(x=df_actual_active['Time'], y=df_actual_active['Active_Tables'], 
-            mode='lines', name='ยอดใช้โต๊ะจากเวลาจริง', line=dict(color='blue', width=3)))
-        fig2.add_trace(go.Scatter(x=df_simulated_active['Time'], y=df_simulated_active['Active_Tables'], 
-            mode='lines', name='จำลอง Cap ที่ 120 นาที', line=dict(color='red', width=3, dash='dash')))
-        fig2.update_layout(
-            title="เปรียบเทียบยอดการใช้โต๊ะ (Actual vs 120-min Cap Simulation)",
-            xaxis_title="เวลา (Time)",
-            yaxis_title="จำนวนโต๊ะที่มีคนนั่ง (Active Tables)",
-            hovermode="x unified"
-        )
-        st.plotly_chart(fig2, use_container_width=True)
-        st.info("**ข้อสรุป (Insights):** ปัญหาแท้จริงคือ **Arrival Bunching** (คนแห่มาพร้อมกัน) กราฟแสดงให้เห็นชัดเจนว่าในช่วงพีก (เช่น 08:00 - 09:30) เส้นสีแดงและสีน้ำเงินทับกันสนิท แปลว่าการ Cap เวลาที่ 120 นาที ไม่ได้ช่วยคืนพื้นที่โต๊ะในช่วงเวลาที่วิกฤตที่สุดเลย")
-        st.header("แนวทางที่ 2: ขึ้นราคา 259 บาท 'ทุกวัน' เวิร์กไหม?")
-        st.markdown("การขึ้นราคาแบบเหมารวม (Blanket Policy) **ไม่ใช่ทางแก้ที่ถูกต้อง** เพราะปัญหาคิวไม่ได้เกิดขึ้นตลอดเวลา การขึ้นราคาจะทำลายฐานลูกค้าในวันที่ร้านว่าง")
-        col1, col2, col3 = st.columns(3)
-        col1.metric("เวลาที่มีคิวเทียบกับเวลาทั้งหมด", "10.8%", "293 จาก 2,705 นาที", delta_color="off")
-        col2.metric("จำนวนวันที่มีคิว", "2 จาก 5 วัน", "เฉพาะชีต 143, 153", delta_color="off")
-        col3.metric("ช่วงเวลาคิวพีกสุด", "08:00 - 11:00", "หนักสุด 09:00-10:00", delta_color="off")
-        st.divider()
-        #กราฟ: ปัญหาไม่ได้เกิดทุกวัน (Bar Chart)
-        st.subheader("1. ปัญหาคิวไม่ได้เกิดขึ้นทุกวัน")
-        df_q = df_all.dropna(subset=['queue_start', 'queue_end']).copy()
-        day_counts = df_q.groupby('Day').size().reset_index(name='Queue_Groups')
-        all_days = pd.DataFrame({'Day': df_all['Day'].unique()})
-        day_counts = pd.merge(all_days, day_counts, on='Day', how='left').fillna(0)
-        day_counts['Color'] = day_counts['Queue_Groups'].apply(lambda x: '#e74c3c' if x > 0 else '#d3d3d3')
-        fig1 = go.Figure(data=[go.Bar(
-            x=day_counts['Day'],
-            y=day_counts['Queue_Groups'],
-            marker_color=day_counts['Color'],
-            text=day_counts['Queue_Groups'],
-            textposition='auto'
-        )])
-        fig1.update_layout(title="จำนวนกลุ่มลูกค้าที่ต้องรอคิว แยกตามวัน (Sheet)", 
-            xaxis_title="วัน (Sheet)", yaxis_title="จำนวนกลุ่มที่รอคิว")
-        st.plotly_chart(fig1, use_container_width=True)
-        #กราฟ: ปัญหาไม่ได้เกิดทั้งวัน (Area Chart)
-        st.subheader("2. ปัญหาคิวไม่ได้เกิดขึ้นทั้งวัน (กระจุกตัวช่วงสาย)")
-        df_q['q_start_dt'] = pd.to_datetime('2026-01-01 ' + df_q['queue_start'].astype(str), errors='coerce').dt.tz_localize(None)
-        df_q['q_end_dt'] = pd.to_datetime('2026-01-01 ' + df_q['queue_end'].astype(str), errors='coerce').dt.tz_localize(None)
-        time_range = pd.date_range("2026-01-01 06:00:00", "2026-01-01 12:00:00", freq="1min")
-        q_density = []
-        for t in time_range:
-            q_count = ((df_q['q_start_dt'].notna()) & (df_q['q_start_dt'] <= t) & (df_q['q_end_dt'].notna()) & (df_q['q_end_dt'] > t)).sum()
-            q_density.append(q_count)
-        fig2 = px.area(x=time_range, y=q_density, labels={'x': 'เวลา', 'y': 'จำนวนกลุ่มที่ยืนรอคิว'}, 
-            title="ความหนาแน่นของคิวรายนาที (รวมทุกวัน)")
-        fig2.update_traces(line_color='#e74c3c', fillcolor='rgba(231, 76, 60, 0.4)')
-        fig2.update_layout(xaxis_tickformat='%H:%M')
-        fig2.add_vrect(x0="2026-01-01 08:00:00", x1="2026-01-01 11:00:00", 
-            fillcolor="yellow", opacity=0.2, layer="below", line_width=0,
-            annotation_text="Peak Period (08:00-11:00)", annotation_position="top left")
-        st.plotly_chart(fig2, use_container_width=True)
-        st.info("**ข้อสรุป (Insights):** หากจะใช้ราคาแก้ปัญหา ต้องเป็น **Targeted Pricing** เช่น การทำ Dynamic Pricing (Early Bird Discount) ให้ราคาถูกลงในช่วง 06:00-07:30 น. เพื่อจูงใจให้คนกระจายตัวออกมาจากช่วง Peak แทนที่จะขึ้นราคา 259 บาทเหมาทุกวัน ซึ่งจะทำให้เสียรายได้จาก Walk-in ในวันปกติไปฟรีๆ")
-
-        st.header("แนวทางที่ 3: ให้สิทธิ์ In-house แซงคิว (Queue Skipping)")
-        st.markdown("นโยบายนี้แก้ปัญหา **ผิดจุด** เพราะเป็นการจัดการความรู้สึก (Fairness) ไม่ใช่การเพิ่มขีดความสามารถในการรองรับ (Capacity) การลัดคิวจึงไม่มีประโยชน์ เพราะไม่มีโต๊ะว่างให้ไปนั่งอยู่ดี")
-        col1, col2 = st.columns(2)
-        col1.metric("คิวเฉลี่ยในช่วงที่มีคิว (Day 153)", "10.6 กลุ่ม", "Walk-in 7.8 | In-house 2.9", delta_color="off")
-        col2.metric("โต๊ะที่ถูกใช้ ณ จุด Peak Queue", "24 ยูนิต", "Walk-in 18 | In-house 6", delta_color="off")
-        st.divider()
-
-        df_153 = df_all[df_all['Day'] == '153'].copy()
-        df_153['Guest_type'] = df_153['Guest_type'].astype(str).str.strip().str.title()
-        df_153['Guest_type'] = df_153['Guest_type'].replace({'Walk In': 'Walk-in', 'In House': 'In-house'})
-
-        df_153['q_start'] = pd.to_datetime('2026-01-01 ' + df_153['queue_start'].astype(str), errors='coerce').dt.tz_localize(None)
-        df_153['q_end'] = pd.to_datetime('2026-01-01 ' + df_153['queue_end'].astype(str), errors='coerce').dt.tz_localize(None)
-        df_153['m_start'] = pd.to_datetime('2026-01-01 ' + df_153['meal_start'].astype(str), errors='coerce').dt.tz_localize(None)
-        df_153['m_end'] = pd.to_datetime('2026-01-01 ' + df_153['meal_end'].astype(str), errors='coerce').dt.tz_localize(None)
-
-        time_range = pd.date_range("2026-01-01 07:00:00", "2026-01-01 11:30:00", freq="1min")
-        q_data, s_data = [], []
-
-        for t in time_range:
-            q_w = ((df_153['Guest_type'] == 'Walk-in') & (df_153['q_start'] <= t) & (df_153['q_end'] > t)).sum()
-            q_i = ((df_153['Guest_type'] == 'In-house') & (df_153['q_start'] <= t) & (df_153['q_end'] > t)).sum()
-            q_data.append({'Time': t, 'Walk-in': q_w, 'In-house': q_i})
-            
-            s_w = ((df_153['Guest_type'] == 'Walk-in') & (df_153['m_start'] <= t) & (df_153['m_end'] > t)).sum()
-            s_i = ((df_153['Guest_type'] == 'In-house') & (df_153['m_start'] <= t) & (df_153['m_end'] > t)).sum()
-            s_data.append({'Time': t, 'Walk-in': s_w, 'In-house': s_i})
-
-        df_q_sim = pd.DataFrame(q_data)
-        df_s_sim = pd.DataFrame(s_data)
-
-        #กราฟ: Active Seating (เพื่อโชว์ Bottleneck)
-        st.subheader("กราฟแสดงจำนวนโต๊ะที่ถูกใช้งาน (Table Occupancy) บนวัน 153")
-        st.markdown("ณ จุดพีก โต๊ะถูกใช้งานเต็มความจุ (~24 ยูนิต) การแซงคิวจึงไม่มีประโยชน์ เพราะไม่มีโต๊ะว่างให้ไปนั่งอยู่ดี")
-
-        fig_seat = go.Figure()
-        fig_seat.add_trace(go.Scatter(x=df_s_sim['Time'], y=df_s_sim['In-house'], mode='lines', stackgroup='one', name='In-house (แขกโรงแรม)', fillcolor='#2ecc71', line=dict(color='#27ae60')))
-        fig_seat.add_trace(go.Scatter(x=df_s_sim['Time'], y=df_s_sim['Walk-in'], mode='lines', stackgroup='one', name='Walk-in (ลูกค้าภายนอก)', fillcolor='#3498db', line=dict(color='#2980b9')))
-
-        fig_seat.add_hline(y=24, line_dash="dash", line_color="red", annotation_text="Max Capacity (~24 Tables)", annotation_position="top left")
-        fig_seat.update_layout(xaxis_tickformat='%H:%M', yaxis_title="จำนวนโต๊ะที่กำลังใช้งาน", hovermode="x unified")
-        st.plotly_chart(fig_seat, use_container_width=True)
-
-        #ข้อสรุป
-        st.error("""
-        **บทสรุป (Key Takeaway):** Queue Skipping ไม่ใช่ 'Capacity Solution' แต่เป็นแค่การย้ายความเจ็บปวด (Pain) ไปรวมไว้ที่ Walk-in ซึ่งจะยิ่งดันให้ยอด Walk-away พุ่งสูงขึ้น นำไปสู่วิกฤตด้านรีวิวและภาพลักษณ์ของโรงแรม วิธีแก้ที่ถูกต้องคือการจัดการ **Table Management (รวม/แยกโต๊ะตาม Pax)** หรือจูงใจด้วยราคาเพื่อลด **Arrival Bunching** ครับ
-        """)
-    with tab3:
-        st.markdown("### Task 3 Deep Dive: 90-Min Walk-in Soft Cap Analysis")
-
-        df_raw = df_all[df_all['seated'] == True].copy()
-        df_walkin = df_raw[df_raw['Guest_type'].str.contains('walk', case=False, na=False)].copy()
-        df_inhouse = df_raw[df_raw['Guest_type'].str.contains('house', case=False, na=False)].copy()
-
-        if df_raw.empty:
-            st.warning("ไม่มีข้อมูลกลุ่มที่นั่ง (seated) ใน dataset ขณะนี้ กรุณาอัปโหลดไฟล์ที่มีข้อมูล meal_start/meal_end และ Guest_type")
-        else:
-            st.info(f"ข้อมูลใน Tab3: Seated={len(df_raw)} แถวนั้น (Walk-in={len(df_walkin)}, In-house={len(df_inhouse)})")
-
-        # --- ส่วนของแถบด้านข้าง (Sidebar) สำหรับ Control Slider ---
-        st.sidebar.header("⚙️ Simulation Settings")
-        st.sidebar.markdown("Management สามารถปรับค่า Soft Cap ด้านล่างเพื่อดูผลกระทบเชิงสถิติทันที")
-
-        proposed_cap = st.sidebar.slider(
-            "ตั้งค่า Soft Cap (นาที) สำหรับ Walk-in:",
-            min_value=60,
-            max_value=150,
-            value=90,
-            step=15,
-            help="เวลาที่กำหนดให้ Walk-in นั่งได้ก่อนที่หน้างานจะเริ่ม 'ขอความร่วมมือ' (Soft cap)"
-        )
-
-        st.sidebar.divider()
-        st.sidebar.markdown(f"""
-        **สรุปข้อเสนอ (Recommendation):**
-        1.  **ใช้เฉพาะกลุ่ม:** Walk-in เท่านั้น
-        2.  **ใช้เฉพาะช่วง:** Queue-heavy (~5 กลุ่มขึ้นไป)
-        3.  **การปฏิบัติ:** แจ้งเตือนนาทีที่ 75, ขอความร่วมมือนาทีที่ {proposed_cap}
-        """)
-
-        # --- ส่วนหลักของการแสดงผลกราฟ ---
-
-        # 1. จัดเตรียมข้อมูลแยกประเภท
-        df_walkin = df_raw[df_raw['Guest_type'] == 'Walk-in']
-        df_inhouse = df_raw[df_raw['Guest_type'] == 'In-house']
-
-        # คำนวณสถิติ
-        walkin_stats = df_walkin['meal_duration_mins'].agg(['mean', 'median', 'count']).round(1)
-        inhouse_stats = df_inhouse['meal_duration_mins'].agg(['mean', 'median', 'count']).round(1)
-
-        # --- กราฟที่ 3: Heatmap Comparison with other Actions ---
-        # พิสูจน์ว่า: Action นี้ดีกว่า Queue Skipping และ Price 259 ในเชิง Operation จริง
-        st.divider()
-        st.markdown("#### 🆚 กราฟ 3: การเปรียบเทียบเชิง Operation ระหว่าง Action Plan")
-        col_map, col_text = st.columns([1, 1.2])
-
-        with col_map:
-            # เตรียมข้อมูล Heatmap การให้คะแนน (Simulated scoring based on analysis)
-            # คะแนน 0-10: แก้ปัญหา root cause (10=ตรงจุด), Impact on operation (10=กระทบน้อย), Implementation easy (10=ง่าย), Unfairness Perception (10=ดูแฟร์สุด)
-            comparison_data = np.array([
-                [10, 8, 9, 8], # 90m Walk-in Cap (ตรงจุด, กระทบเฉพาะจุดช่วงพีค, อธิบายง่าย, ดูแฟร์)
-                [3, 1, 3, 2],  # Price everyday 259 (ไม่ตรงจุดช่วงพีค, กระทบทุกคนทุกวัน, dynamic pricing ยาก, ลูกค้าเคือง)
-                [2, 7, 10, 1]  # Queue Skipping (ไม่แก้ปัญหาสวนกลาง, ไม่เพิ่ม capacity, ทำง่าย, Walk-in มองว่าไม่แฟร์สุดๆ)
-            ])
-            
-            actions = ["Proposed: 90m Walk-in Cap", "Action A: Price 259 everyday", "Action B: In-house Queue Skipping"]
-            criteria = ["Solve Root Cause?\n(Long-stay)", "Impact on\nOperation/Guest", "Implementation\nEase", "Unfairness\nPerception"]
-            df_heat = pd.DataFrame(comparison_data, index=actions, columns=criteria)
-
-            fig3, ax3 = plt.subplots(figsize=(10, 5))
-            sns.heatmap(df_heat, annot=True, cmap="YlGnBu", cbar=False, 
-                        fmt='g', linewidths=2, ax=ax3, annot_kws={"fontsize":12, "weight": "bold"})
-            
-            # ตกแต่ง
-            ax3.set_title('Operational Comparison Score (Higher is Better)', fontsize=14, pad=15)
-            plt.xticks(rotation=0, fontsize=10)
-            plt.yticks(rotation=0, fontsize=10)
-            plt.tight_layout()
-            
-            st.pyplot(fig3)
-
-        with col_text:
-            st.markdown(f"""
-            **สรุปผลการวิเคราะห์เปรียบเทียบ:**
-            * **Proposed Plan (90m Walk-in Cap):** เป็นวิธีเดียวที่แตะถึงปัญหา **Long-stay ของ Walk-in** ซึ่งเป็นตัวยึด Capacity ในช่วงที่คิวหนักจริงๆ (Root cause) ในขณะที่รักษาสิทธิ์ของ In-house ไว้ (ดู กราฟ 1)
-            * **Action A (Price 259):** เป็นการ 'ยิงกว้าง' กระทบทุกคน ตลอดเวลา ทั้งที่คิวไม่ได้หนักทุกวัน management ความรู้สึกยากกว่า
-            * **Action B (Queue Skipping):** แค่ 'สลับลำดับคนรอ' แต่ไม่ได้คืนโต๊ะเข้าระบบ (ดู กราฟ 2 ที่แสดงจำนวน Capacity ที่คืนได้ในเชิงสถิติ) และเสี่ยงทำให้ Walk-in กลุ่มใหญ่ไม่พอใจสูง
-
-            **✅ ข้อสรุป:** 90-minute Walk-in Soft Cap คือ **Operational Solution** ที่ดีที่สุดในการจัดการ Bottleneck ในโรงแรม
-            """)
-else:
-    st.info("💡 กรุณาอัปโหลดไฟล์ Excel Dataset ของคุณที่ด้านบนเพื่อเริ่มต้นใช้งานแดชบอร์ด")
-
-
+    st.success(
+        "**สรุป:** Soft Cap ที่ Walk-in เฉพาะช่วง Peak คือแนวทางที่ "
+        "**แก้ปัญหาที่ต้นเหตุ (Arrival Bunching + Long-stay)** "
+        "โดยไม่กระทบ In-house และรักษาภาพลักษณ์ของโรงแรมไว้ได้ ✅"
+    )
