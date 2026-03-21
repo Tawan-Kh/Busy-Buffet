@@ -271,10 +271,10 @@ if uploaded_file is not None:
         df_153['Guest_type'] = df_153['Guest_type'].astype(str).str.strip().str.title()
         df_153['Guest_type'] = df_153['Guest_type'].replace({'Walk In': 'Walk-in', 'In House': 'In-house'})
 
-        df_153['q_start'] = pd.to_datetime('2026-01-01 ' + df_153['queue_start'].astype(str), errors='coerce')
-        df_153['q_end'] = pd.to_datetime('2026-01-01 ' + df_153['queue_end'].astype(str), errors='coerce')
-        df_153['m_start'] = pd.to_datetime('2026-01-01 ' + df_153['meal_start'].astype(str), errors='coerce')
-        df_153['m_end'] = pd.to_datetime('2026-01-01 ' + df_153['meal_end'].astype(str), errors='coerce')
+        df_153['q_start'] = pd.to_datetime('2026-01-01 ' + df_153['queue_start'].astype(str), errors='coerce').dt.tz_localize(None)
+        df_153['q_end'] = pd.to_datetime('2026-01-01 ' + df_153['queue_end'].astype(str), errors='coerce').dt.tz_localize(None)
+        df_153['m_start'] = pd.to_datetime('2026-01-01 ' + df_153['meal_start'].astype(str), errors='coerce').dt.tz_localize(None)
+        df_153['m_end'] = pd.to_datetime('2026-01-01 ' + df_153['meal_end'].astype(str), errors='coerce').dt.tz_localize(None)
 
         time_range = pd.date_range("2026-01-01 07:00:00", "2026-01-01 11:30:00", freq="1min")
         q_data, s_data = [], []
