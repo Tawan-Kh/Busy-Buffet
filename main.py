@@ -1,14 +1,40 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
+import plotly.express as px
+import plotly.graph_objects as go
 
-st.set_page_config(page_title="Busy Buffet Analytics", layout="wide")
+# สร้างข้อมูลจำลอง
+np.random.seed(42)
+num_rows = 1000
+days = ['Day1', 'Day2', 'Day3']
+guest_types = ['Walk In', 'In House']
+df_list = []
+for day in days:
+    n = num_rows // len(days)
+    day_data = {
+        'service_no.': range(1, n+1),
+        'pax': np.random.randint(1, 6, n),
+        'queue_start': pd.to_datetime(['07:00:00'] * n) + pd.to_timedelta(np.random.randint(0, 180, n), unit='m'),
+        'queue_end': pd.to_datetime(['07:00:00'] * n) + pd.to_timedelta(np.random.randint(0, 180, n), unit='m'),
+        'table_no.': np.random.randint(1, 50, n),
+        'meal_start': pd.to_datetime(['08:00:00'] * n) + pd.to_timedelta(np.random.randint(0, 240, n), unit='m'),
+        'meal_end': pd.to_datetime(['08:00:00'] * n) + pd.to_timedelta(np.random.randint(60, 300, n), unit='m'),
+        'Guest_type': np.random.choice(guest_types, n)
+    }
+    df_day = pd.DataFrame(day_data)
+    df_day['Day'] = day
+    df_list.append(df_day)
+df_all = pd.concat(df_list, ignore_index=True)
+# สำหรับโค้ดใหม่
+df_all['meal_start_str'] = df_all['meal_start'].dt.strftime('%H:%M:%S')
+df_all['meal_end_str'] = df_all['meal_end'].dt.strftime('%H:%M:%S')
 
-st.title("🍽️ Busy Buffet - Data Analytics Dashboard")
-st.markdown("แดชบอร์ดสรุปผลการวิเคราะห์ข้อมูลลูกค้า การรอคิว และระยะเวลาทานอาหาร")
+st.title("🍽️ Busy Buffet Analytics Dashboard")
 
-uploaded_file = st.file_uploader("อัปโหลดไฟล์", type=['xlsx', 'csv'])
+tab1, tab2 = st.tabs(["Dashboard", "Cap Time Analysis"])
 
 if uploaded_file is not None:
     try:
