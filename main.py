@@ -217,4 +217,63 @@ with tab2:
 
     st.info("**ข้อสรุป (Insights):** ปัญหาแท้จริงคือ **Arrival Bunching** (คนแห่มาพร้อมกัน) กราฟแสดงให้เห็นชัดเจนว่าในช่วงพีก (เช่น 08:00 - 09:30) เส้นสีแดงและสีน้ำเงินทับกันสนิท แปลว่าการ Cap เวลาที่ 120 นาที ไม่ได้ช่วยคืนพื้นที่โต๊ะในช่วงเวลาที่วิกฤตที่สุดเลย")
 
+    st.header("แนวทางที่ 2: ขึ้นราคา 259 บาท 'ทุกวัน' เวิร์กไหม?")
+    st.markdown("การขึ้นราคาแบบเหมารวม (Blanket Policy) **ไม่ใช่ทางแก้ที่ถูกต้อง** เพราะปัญหาคิวไม่ได้เกิดขึ้นตลอดเวลา การขึ้นราคาจะทำลายฐานลูกค้าในวันที่ร้านว่าง")
+
+    # --- ตัวเลข Highlight ---
+    col1, col2, col3 = st.columns(3)
+    col1.metric("เวลาที่มีคิวเทียบกับเวลาทั้งหมด", "10.8%", "293 จาก 2,705 นาที", delta_color="off")
+    col2.metric("จำนวนวันที่มีคิว", "2 จาก 5 วัน", "เฉพาะชีต 143, 153", delta_color="off")
+    col3.metric("ช่วงเวลาคิวพีกสุด", "08:00 - 11:00", "หนักสุด 09:00-10:00", delta_color="off")
+
+    st.divider()
+
+    # --- กราฟ 1: ปัญหาไม่ได้เกิดทุกวัน (Bar Chart) ---
+    st.subheader("1. ปัญหาคิวไม่ได้เกิดขึ้นทุกวัน")
+    # จัดกลุ่มนับจำนวนคิว
+    df_q = df_all.dropna(subset=['queue_start', 'queue_end']).copy()
+    day_counts = df_q.groupby('Day').size().reset_index(name='Queue_Groups')
+    all_days = pd.DataFrame({'Day': df_all['Day'].unique()})
+    day_counts = pd.merge(all_days, day_counts, on='Day', how='left').fillna(0)
+
+    # ทำสี Highlight เฉพาะวันที่มีคิว
+    day_counts['Color'] = day_counts['Queue_Groups'].apply(lambda x: '#e74c3c' if x > 0 else '#d3d3d3')
+
+    fig1 = go.Figure(data=[go.Bar(
+        x=day_counts['Day'],
+        y=day_counts['Queue_Groups'],
+        marker_color=day_counts['Color'],
+        text=day_counts['Queue_Groups'],
+        textposition='auto'
+    )])
+    fig1.update_layout(title="จำนวนกลุ่มลูกค้าที่ต้องรอคิว แยกตามวัน (Sheet)", 
+                       xaxis_title="วัน (Sheet)", yaxis_title="จำนวนกลุ่มที่รอคิว")
+    st.plotly_chart(fig1, use_container_width=True)
+
+
+    # --- กราฟ 2: ปัญหาไม่ได้เกิดทั้งวัน (Area Chart) ---
+    st.subheader("2. ปัญหาคิวไม่ได้เกิดขึ้นทั้งวัน (กระจุกตัวช่วงสาย)")
+    df_q['q_start_dt'] = pd.to_datetime('2026-01-01 ' + df_q['queue_start'].astype(str), errors='coerce')
+    df_q['q_end_dt'] = pd.to_datetime('2026-01-01 ' + df_q['queue_end'].astype(str), errors='coerce')
+
+    time_range = pd.date_range("2026-01-01 06:00:00", "2026-01-01 12:00:00", freq="1min")
+    q_density = []
+    for t in time_range:
+        q_count = ((df_q['q_start_dt'] <= t) & (df_q['q_end_dt'] > t)).sum()
+        q_density.append(q_count)
+
+    fig2 = px.area(x=time_range, y=q_density, labels={'x': 'เวลา', 'y': 'จำนวนกลุ่มที่ยืนรอคิว'}, 
+                   title="ความหนาแน่นของคิวรายนาที (รวมทุกวัน)")
+    fig2.update_traces(line_color='#e74c3c', fillcolor='rgba(231, 76, 60, 0.4)')
+    fig2.update_layout(xaxis_tickformat='%H:%M')
+
+    # ตีกรอบช่วง 08:00 - 11:00
+    fig2.add_vrect(x0="2026-01-01 08:00:00", x1="2026-01-01 11:00:00", 
+                   fillcolor="yellow", opacity=0.2, layer="below", line_width=0,
+                   annotation_text="Peak Period (08:00-11:00)", annotation_position="top left")
+
+    st.plotly_chart(fig2, use_container_width=True)
+
+    st.info("**ข้อสรุป (Insights):** หากจะใช้ราคาแก้ปัญหา ต้องเป็น **Targeted Pricing** เช่น การทำ Dynamic Pricing (Early Bird Discount) ให้ราคาถูกลงในช่วง 06:00-07:30 น. เพื่อจูงใจให้คนกระจายตัวออกมาจากช่วง Peak แทนที่จะขึ้นราคา 259 บาทเหมาทุกวัน ซึ่งจะทำให้เสียรายได้จาก Walk-in ในวันปกติไปฟรีๆ")
+
 
