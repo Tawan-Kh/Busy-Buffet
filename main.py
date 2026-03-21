@@ -5,9 +5,53 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import plotly.express as px
 import plotly.graph_objects as go
+import os
 
 st.set_page_config(page_title="Busy Buffet Analytics", layout="wide")
 st.title("🍽️ Busy Buffet Analytics Dashboard")
+
+@st.cache_data
+def load_real_data():
+    # ค้นหาไฟล์ CSV ที่เกี่ยวข้องในโฟลเดอร์ปัจจุบัน
+    files = [f for f in os.listdir('.') if f.endswith('.csv') and any(x in f for x in ['133', '143', '153', '173', '183'])]
+    
+    df_list = []
+    for file in files:
+        try:
+            temp_df = pd.read_csv(file)
+            # คลีนชื่อคอลัมน์ (บางไฟล์มี . ต่อท้าย บางไฟล์ไม่มี)
+            temp_df.columns = temp_df.columns.str.replace('.', '', regex=False).str.strip()
+            
+            if 'meal_start' in temp_df.columns and 'meal_end' in temp_df.columns:
+                temp_df['date_ref'] = file.split(' - ')[-1].replace('.csv', '')
+                df_list.append(temp_df)
+        except Exception as e:
+            pass
+
+    if not df_list:
+        st.error("❌ ไม่พบไฟล์ข้อมูล 133, 143, 153, 173, 183.csv ในโฟลเดอร์นี้ กรุณาตรวจสอบตำแหน่งไฟล์")
+        return pd.DataFrame()
+
+    df = pd.concat(df_list, ignore_index=True)
+
+    # คลีนข้อมูล Guest_type ป้องกันเว้นวรรคแปลกๆ
+    df['Guest_type'] = df['Guest_type'].astype(str).str.strip()
+    
+    # ลบแถวที่ไม่มีข้อมูลเวลา
+    df = df.dropna(subset=['meal_start', 'meal_end']).copy()
+
+    # แปลงเวลาและคำนวณ Duration (นาที)
+    df['start_td'] = pd.to_timedelta(df['meal_start'])
+    df['end_td'] = pd.to_timedelta(df['meal_end'])
+    df['meal_duration_mins'] = (df['end_td'] - df['start_td']).dt.total_seconds() / 60
+    
+    # จัดการกรณีเวลาข้ามวัน
+    df.loc[df['meal_duration_mins'] < 0, 'meal_duration_mins'] += 24 * 60
+    
+    # ดึงชั่วโมงที่เริ่มกินเพื่อใช้วิเคราะห์ช่วงพีค
+    df['arrival_hour'] = df['start_td'].dt.components['hours']
+
+    return df
 
 uploaded_file = st.file_uploader("อัปโหลดไฟล์ Excel หรือ CSV", type=['xlsx', 'csv'])
 
@@ -110,24 +154,45 @@ if uploaded_file is not None:
         #Meal Duration
         st.subheader("3. Meal Duration & Table Occupancy Dynamics")
         df_meal = df_all[df_all['seated'] == True].copy()
-        duration_cap = df_meal['meal_duration_mins'].quantile(0.99)
-        df_meal = df_meal[df_meal['meal_duration_mins'] <= duration_cap]
-        fig3 = plt.figure(figsize=(14, 5))
-        plt.subplot(1, 2, 1)
-        sns.histplot(data=df_meal, x='meal_duration_mins', hue='Guest_type', kde=True, bins=20, palette='Set1', alpha=0.6)
-        plt.title('3.1 Meal Duration Distribution (All Days, Outliers Trimmed 99th pct)')
-        plt.xlabel('Meal Duration (Minutes)')
-        plt.ylabel('Frequency')
-        plt.subplot(1, 2, 2)
-        sns.violinplot(data=df_meal, x='Guest_type', y='meal_duration_mins', palette='Set1', inner=None)
-        sns.stripplot(data=df_meal, x='Guest_type', y='meal_duration_mins', color='k', size=3, alpha=0.45, jitter=0.15)
-        plt.title('3.2 Meal Duration Spread (All Days, Outliers Trimmed 99th pct)')
-        plt.ylabel('Meal Duration (Minutes)')
-        summary_stats = df_meal.groupby('Guest_type')['meal_duration_mins'].agg(['count', 'mean', 'median', 'std']).round(2)
-        st.markdown("**สถิติการทานอาหาร (หลังกรอง outliers 99th percentile)**")
-        st.dataframe(summary_stats)
-        plt.tight_layout()
-        st.pyplot(fig3)
+        if df_meal.empty:
+            st.warning("ไม่พบข้อมูลการทานอาหาร (seated) ในชุดข้อมูลนี้")
+        else:
+            duration_cap = df_meal['meal_duration_mins'].quantile(0.99)
+            df_meal = df_meal[df_meal['meal_duration_mins'] <= duration_cap]
+
+            if df_meal.empty:
+                st.warning("ข้อมูลหลังตัด outlier 99th percentile ไม่มีข้อมูลพอสำหรับกราฟ")
+            else:
+                # ถ้ามีข้อมูลแค่หนึ่งค่าในกลุ่มใดกลุ่มหนึ่ง KDE จะชน error
+                group_counts = df_meal.groupby('Guest_type')['meal_duration_mins'].count()
+                kde_enabled = all(group_counts >= 2) if not group_counts.empty else False
+
+                fig3 = plt.figure(figsize=(14, 5))
+                plt.subplot(1, 2, 1)
+                sns.histplot(
+                    data=df_meal,
+                    x='meal_duration_mins',
+                    hue='Guest_type',
+                    kde=kde_enabled,
+                    bins=20,
+                    palette='Set1',
+                    alpha=0.6
+                )
+                plt.title('3.1 Meal Duration Distribution (All Days, Outliers Trimmed 99th pct)')
+                plt.xlabel('Meal Duration (Minutes)')
+                plt.ylabel('Frequency')
+
+                plt.subplot(1, 2, 2)
+                sns.violinplot(data=df_meal, x='Guest_type', y='meal_duration_mins', palette='Set1', inner=None)
+                sns.stripplot(data=df_meal, x='Guest_type', y='meal_duration_mins', color='k', size=3, alpha=0.45, jitter=0.15)
+                plt.title('3.2 Meal Duration Spread (All Days, Outliers Trimmed 99th pct)')
+                plt.ylabel('Meal Duration (Minutes)')
+
+                summary_stats = df_meal.groupby('Guest_type')['meal_duration_mins'].agg(['count', 'mean', 'median', 'std']).round(2)
+                st.markdown("**สถิติการทานอาหาร (หลังกรอง outliers 99th percentile)**")
+                st.dataframe(summary_stats)
+                plt.tight_layout()
+                st.pyplot(fig3)
         st.header("📌 สถิติภาพรวม (Overall)")
         st.write("**ระยะเวลาทานอาหารเฉลี่ย (นาที) แยกตามประเภทลูกค้า:**")
         st.dataframe(df_all[df_all['seated'] == True].groupby('Guest_type')['meal_duration_mins'].mean().round(2))
@@ -288,6 +353,13 @@ if uploaded_file is not None:
         st.markdown("### Task 3 Deep Dive: 90-Min Walk-in Soft Cap Analysis")
 
         df_raw = df_all[df_all['seated'] == True].copy()
+        df_walkin = df_raw[df_raw['Guest_type'].str.contains('walk', case=False, na=False)].copy()
+        df_inhouse = df_raw[df_raw['Guest_type'].str.contains('house', case=False, na=False)].copy()
+
+        if df_raw.empty:
+            st.warning("ไม่มีข้อมูลกลุ่มที่นั่ง (seated) ใน dataset ขณะนี้ กรุณาอัปโหลดไฟล์ที่มีข้อมูล meal_start/meal_end และ Guest_type")
+        else:
+            st.info(f"ข้อมูลใน Tab3: Seated={len(df_raw)} แถวนั้น (Walk-in={len(df_walkin)}, In-house={len(df_inhouse)})")
 
         # --- ส่วนของแถบด้านข้าง (Sidebar) สำหรับ Control Slider ---
         st.sidebar.header("⚙️ Simulation Settings")
@@ -319,87 +391,6 @@ if uploaded_file is not None:
         # คำนวณสถิติ
         walkin_stats = df_walkin['meal_duration_mins'].agg(['mean', 'median', 'count']).round(1)
         inhouse_stats = df_inhouse['meal_duration_mins'].agg(['mean', 'median', 'count']).round(1)
-
-        # layout กราฟ
-        col_left, col_right = st.columns(2)
-
-        # --- กราฟที่ 1: Distribution of Meal Duration (In-house vs. Walk-in) ---
-        # พิสูจน์ว่า: 5 ชั่วโมงไม่ใช่ปัญหา แต่คือ 'กลุ่ม Walk-in ยึดโต๊ะ'
-        with col_left:
-            st.markdown("#### 📈 กราฟ 1: การกระจายตัวของระยะเวลากิน (พิสูจน์ Bottleneck)")
-            
-            sns.set_theme(style="whitegrid", font_scale=1.1)
-            fig1, ax1 = plt.subplots(figsize=(10, 6))
-
-            # KDE Plot (Smooth distribution)
-            sns.kdeplot(data=df_inhouse, x='meal_duration_mins', fill=True, 
-                        color='#3498db', label=f"In-house (Median: {inhouse_stats['median']}m)", 
-                        alpha=0.5, ax=ax1, linewidth=2)
-            sns.kdeplot(data=df_walkin, x='meal_duration_mins', fill=True, 
-                        color='#e74c3c', label=f"Walk-in (Median: {walkin_stats['median']}m)", 
-                        alpha=0.4, ax=ax1, linewidth=2)
-
-            # ขีดเส้น proposed_cap
-            ax1.axvline(x=proposed_cap, color='#2c3e50', linestyle='--', linewidth=2.5, label=f'Proposed Soft Cap: {proposed_cap}m')
-
-            # ตกแต่งกราฟ
-            ax1.set_xlim(0, 180) # โฟกัสช่วงเวลาที่เป็นปัญหา
-            ax1.set_title(f'Comparison of Meal Duration: {walkin_stats["count"]:.0f} Walk-in vs {inhouse_stats["count"]:.0f} In-house Groups', fontsize=14)
-            ax1.set_xlabel('Meal Duration (Minutes)', fontsize=12)
-            ax1.set_ylabel('Density', fontsize=12)
-            ax1.legend(fontsize=10)
-            plt.tight_layout()
-            
-            st.pyplot(fig1)
-            
-            # แสดงตัวเลข Key Metrics
-            m1, m2, m3 = st.columns(3)
-            m1.metric("Avg Walk-in Duration", f"{walkin_stats['mean']} m")
-            m2.metric("Avg In-house Duration", f"{inhouse_stats['mean']} m", f"{- (walkin_stats['mean'] - inhouse_stats['mean']):.1f} m vs Walk-in")
-            m3.metric("Max Cap ที่เสนอ", f"{proposed_cap} m")
-
-
-        # --- กราฟที่ 2: Cumulative Distribution Plot (Percent impacted slider) ---
-        # พิสูจน์ว่า: Soft Cap ที่เลือกกระทบคนน้อยแค่ไหน และได้ capacity คืนเท่าไหร่ (ในเชิงสถิติ)
-        with col_right:
-            st.markdown(f"#### 📊 กราฟ 2: สัดส่วนสะสม (ดู % กลุ่มยึดโต๊ะที่ถูกจำกัดเวลา {proposed_cap}m)")
-
-            fig2, ax2 = plt.subplots(figsize=(10, 6))
-
-            # ECDF Plot (Cumulative)
-            sns.ecdfplot(data=df_walkin, x='meal_duration_mins', color='#e74c3c', 
-                         linewidth=2.5, label='Walk-in CDF', ax=ax2)
-            
-            # ขีดเส้น Proposed Cap และหาค่า Percentile
-            percentile_at_cap = (df_walkin['meal_duration_mins'] <= proposed_cap).mean() * 100
-            percent_impacted = 100 - percentile_at_cap
-
-            # ขีดเส้นแนวนอน (Percentile) และแนวตั้ง (Time Cap)
-            ax2.axvline(x=proposed_cap, color='#2c3e50', linestyle='--')
-            ax2.axhline(y=percentile_at_cap / 100, color='#95a5a6', linestyle=':')
-
-            # จุดตัด
-            ax2.plot(proposed_cap, percentile_at_cap / 100, 'ko') 
-
-            # ข้อความอธิบาย
-            ax2.text(proposed_cap + 3, (percentile_at_cap / 100) - 0.07, 
-                     f'~{percentile_at_cap:.1f}% of Walk-in\nFinish within {proposed_cap}m', fontsize=10)
-
-            # ตกแต่งกราฟ
-            ax2.set_xlim(0, 180)
-            ax2.set_title(f'Cumulative Distribution: How many Walk-in groups are long-stay?', fontsize=14)
-            ax2.set_xlabel('Meal Duration (Minutes)', fontsize=12)
-            ax2.set_ylabel('Cumulative Proportion (0-1)', fontsize=12)
-            plt.tight_layout()
-
-            st.pyplot(fig2)
-
-            # แสดงสรุปผลกระทบจำลอง
-            if proposed_cap == 90:
-                st.info(f"🚨 **สรุปผลกระทบที่ {proposed_cap} นาที:** จะกระทบกลุ่ม Walk-in ที่ยึดโต๊ะนานประมาณ **{percent_impacted:.1f}%** (กลุ่มเป้าหมาย Bottleneck) ในขณะที่อีก **{percentile_at_cap:.1f}%** กินเสร็จปกติโดยไม่โดนจำกัดเวลาเลย")
-            else:
-                st.warning(f"🚨 **สรุปผลกระทบที่ {proposed_cap} นาที (จำลอง):** จะกระทบกลุ่ม Walk-in ที่ยึดโต๊ะนานประมาณ **{percent_impacted:.1f}%** และมีอีก **{percentile_at_cap:.1f}%** ที่กินเสร็จปกติ")
-
 
         # --- กราฟที่ 3: Heatmap Comparison with other Actions ---
         # พิสูจน์ว่า: Action นี้ดีกว่า Queue Skipping และ Price 259 ในเชิง Operation จริง
