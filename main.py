@@ -8,7 +8,6 @@ st.set_page_config(page_title="Busy Buffet Analytics", layout="wide")
 st.title("🍽️ Busy Buffet - Data Analytics Dashboard")
 st.markdown("แดชบอร์ดสรุปผลการวิเคราะห์ข้อมูลลูกค้า การรอคิว และระยะเวลาทานอาหาร")
 
-# 1. สร้างช่องอัปโหลดไฟล์
 uploaded_file = st.file_uploader("อัปโหลดไฟล์", type=['xlsx', 'csv'])
 
 if uploaded_file is not None:
@@ -21,10 +20,8 @@ if uploaded_file is not None:
             all_sheets = pd.read_excel(uploaded_file, sheet_name=None)
         cols = ['service_no.', 'pax', 'queue_start', 'queue_end', 'table_no.', 'meal_start', 'meal_end', 'Guest_type']
         dfs = []
-
         st.header("📊 Per-sheet Analytics (สรุปผลรายวัน)")
         
-        # 2. จัดการทีละชีต และแสดงผลด้วย Metric ของ Streamlit
         for sheet_name, df_temp in all_sheets.items():
             use_cols = [c for c in cols if c in df_temp.columns]
             df_temp = df_temp[use_cols].copy()
@@ -50,7 +47,6 @@ if uploaded_file is not None:
             walk_aways = df_temp['walk_away'].sum()
             avg_wait = df_temp[df_temp['wait_time_mins'] > 0]['wait_time_mins'].mean()
 
-            # แสดงผลแบบการ์ดตัวเลข (Metrics)
             st.subheader(f"📅 ข้อมูลชีต: {sheet_name}")
             col1, col2, col3 = st.columns(3)
             col1.metric("จำนวนลูกค้าทั้งหมด", f"{total_pax:.0f} คน", f"{total_groups} กลุ่ม")
@@ -59,11 +55,9 @@ if uploaded_file is not None:
                  col3.metric("เวลารอคิวเฉลี่ย", f"{avg_wait:.2f} นาที")
             else:
                  col3.metric("เวลารอคิวเฉลี่ย", "ไม่มีการรอคิว")
-            
             st.divider()
             dfs.append(df_temp)
 
-        # 3. รวม DataFrame และสร้างกราฟ
         if len(dfs) == 0:
             st.warning("ไม่พบข้อมูลที่สามารถใช้งานได้หลังจากกรองข้อมูลแล้ว กรุณาตรวจสอบคอลัมน์และประเภทข้อมูลในไฟล์ Excel")
             st.stop()
@@ -72,7 +66,7 @@ if uploaded_file is not None:
         st.header("📈 Queue Management & Customer Behavior Analytics")
         sns.set_theme(style="whitegrid")
 
-        # กราฟ 1: Queue Performance
+        #Queue Performance
         st.subheader("1. Queue Performance & Customer Attrition Analysis")
         fig1 = plt.figure(figsize=(14, 5))
         plt.subplot(1, 2, 1)
@@ -91,7 +85,7 @@ if uploaded_file is not None:
         plt.tight_layout()
         st.pyplot(fig1)
 
-        # กราฟ 2: Daily Guest Volume
+        #Daily Guest Volume
         st.subheader("2. Daily Guest Volume & Peak Demand Analysis")
         fig2 = plt.figure(figsize=(10, 5))
         daily_pax = df_all.groupby(['Day', 'Guest_type'])['pax'].sum().reset_index()
@@ -101,10 +95,10 @@ if uploaded_file is not None:
         plt.xlabel('Day (Sheet Name)')
         st.pyplot(fig2)
 
-        # กราฟ 3: Meal Duration
+        #Meal Duration
         st.subheader("3. Meal Duration & Table Occupancy Dynamics")
         df_meal = df_all[df_all['seated'] == True].copy()
-        # กรอง outliers แบบง่าย เพื่อให้กราฟไม่เบี้ยวจนเกินไป
+        #กรอง outliers
         duration_cap = df_meal['meal_duration_mins'].quantile(0.99)
         df_meal = df_meal[df_meal['meal_duration_mins'] <= duration_cap]
 
@@ -121,7 +115,6 @@ if uploaded_file is not None:
         plt.title('3.2 Meal Duration Spread (All Days, Outliers Trimmed 99th pct)')
         plt.ylabel('Meal Duration (Minutes)')
 
-        # เพิ่มค่าทางสถิติเชิงพื้นฐานในกราฟ
         summary_stats = df_meal.groupby('Guest_type')['meal_duration_mins'].agg(['count', 'mean', 'median', 'std']).round(2)
         st.markdown("**สถิติการทานอาหาร (หลังกรอง outliers 99th percentile)**")
         st.dataframe(summary_stats)
@@ -129,7 +122,6 @@ if uploaded_file is not None:
         plt.tight_layout()
         st.pyplot(fig3)
 
-        # สรุปภาพรวม
         st.header("📌 สถิติภาพรวม (Overall)")
         st.write("**ระยะเวลาทานอาหารเฉลี่ย (นาที) แยกตามประเภทลูกค้า:**")
         st.dataframe(df_all[df_all['seated'] == True].groupby('Guest_type')['meal_duration_mins'].mean().round(2))
