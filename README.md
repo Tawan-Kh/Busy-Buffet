@@ -3,6 +3,7 @@
 แดชบอร์ดสรุปผลการวิเคราะห์ข้อมูลลูกค้า การรอคิว และระยะเวลาการทานอาหารสำหรับร้านอาหารบุฟเฟต์ ได้อย่างง่ายดายผ่านการอัปโหลดไฟล์ Excel หรือ CSV
 
 **🌐 Live Demo:** [Busy Buffet Dashboard](https://busy-buffet-acpkvngbksncvdq6v4fw7t.streamlit.app/)
+**📎Link Excel:** [2026 Data Test1 Final - Busy Buffet Dataset](https://1drv.ms/x/c/084bdc6bd92a9365/IQBd_V5Vu9yAQq42rQpHLqnpAS5TOPWMNQyGrpKoJrrdidA?e=nEqjqW)
 
 ## ✨ ฟีเจอร์หลัก (Features)
 
