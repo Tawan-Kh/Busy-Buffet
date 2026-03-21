@@ -259,7 +259,7 @@ with tab2:
     time_range = pd.date_range("2026-01-01 06:00:00", "2026-01-01 12:00:00", freq="1min")
     q_density = []
     for t in time_range:
-        q_count = ((df_q['q_start_dt'] <= t) & (df_q['q_end_dt'] > t)).sum()
+        q_count = ((df_q['q_start_dt'].notna()) & (df_q['q_start_dt'] <= t) & (df_q['q_end_dt'].notna()) & (df_q['q_end_dt'] > t)).sum()
         q_density.append(q_count)
 
     fig2 = px.area(x=time_range, y=q_density, labels={'x': 'เวลา', 'y': 'จำนวนกลุ่มที่ยืนรอคิว'}, 
