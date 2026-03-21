@@ -103,16 +103,29 @@ if uploaded_file is not None:
 
         # กราฟ 3: Meal Duration
         st.subheader("3. Meal Duration & Table Occupancy Dynamics")
+        df_meal = df_all[df_all['seated'] == True].copy()
+        # กรอง outliers แบบง่าย เพื่อให้กราฟไม่เบี้ยวจนเกินไป
+        duration_cap = df_meal['meal_duration_mins'].quantile(0.99)
+        df_meal = df_meal[df_meal['meal_duration_mins'] <= duration_cap]
+
         fig3 = plt.figure(figsize=(14, 5))
         plt.subplot(1, 2, 1)
-        sns.histplot(data=df_all[df_all['seated'] == True], x='meal_duration_mins', hue='Guest_type', kde=True, bins=20, palette='Set1')
-        plt.title('3.1 Meal Duration Distribution (All Days)')
+        sns.histplot(data=df_meal, x='meal_duration_mins', hue='Guest_type', kde=True, bins=20, palette='Set1', alpha=0.6)
+        plt.title('3.1 Meal Duration Distribution (All Days, Outliers Trimmed 99th pct)')
         plt.xlabel('Meal Duration (Minutes)')
+        plt.ylabel('Frequency')
 
         plt.subplot(1, 2, 2)
-        sns.boxplot(data=df_all[df_all['seated'] == True], x='Guest_type', y='meal_duration_mins', palette='Set1')
-        plt.title('3.2 Meal Duration Spread (All Days)')
+        sns.violinplot(data=df_meal, x='Guest_type', y='meal_duration_mins', palette='Set1', inner=None)
+        sns.stripplot(data=df_meal, x='Guest_type', y='meal_duration_mins', color='k', size=3, alpha=0.45, jitter=0.15)
+        plt.title('3.2 Meal Duration Spread (All Days, Outliers Trimmed 99th pct)')
         plt.ylabel('Meal Duration (Minutes)')
+
+        # เพิ่มค่าทางสถิติเชิงพื้นฐานในกราฟ
+        summary_stats = df_meal.groupby('Guest_type')['meal_duration_mins'].agg(['count', 'mean', 'median', 'std']).round(2)
+        st.markdown("**สถิติการทานอาหาร (หลังกรอง outliers 99th percentile)**")
+        st.dataframe(summary_stats)
+
         plt.tight_layout()
         st.pyplot(fig3)
 
