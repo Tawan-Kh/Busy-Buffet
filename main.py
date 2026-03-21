@@ -255,6 +255,61 @@ if uploaded_file is not None:
                        annotation_text="Peak Period (08:00-11:00)", annotation_position="top left")
         st.plotly_chart(fig2, use_container_width=True)
         st.info("**ข้อสรุป (Insights):** หากจะใช้ราคาแก้ปัญหา ต้องเป็น **Targeted Pricing** เช่น การทำ Dynamic Pricing (Early Bird Discount) ให้ราคาถูกลงในช่วง 06:00-07:30 น. เพื่อจูงใจให้คนกระจายตัวออกมาจากช่วง Peak แทนที่จะขึ้นราคา 259 บาทเหมาทุกวัน ซึ่งจะทำให้เสียรายได้จาก Walk-in ในวันปกติไปฟรีๆ")
+
+        st.header("แนวทางที่ 3: ให้สิทธิ์ In-house แซงคิว (Queue Skipping)")
+        st.markdown("นโยบายนี้แก้ปัญหา **ผิดจุด** เพราะเป็นการจัดการความรู้สึก (Fairness) ไม่ใช่การเพิ่มขีดความสามารถในการรองรับ (Capacity) การลัดคิวจึงไม่มีประโยชน์ เพราะไม่มีโต๊ะว่างให้ไปนั่งอยู่ดี")
+
+        # --- ตัวเลข Highlight จาก Insight ของคุณ ---
+        col1, col2 = st.columns(2)
+        col1.metric("คิวเฉลี่ยในช่วงที่มีคิว (Day 153)", "10.6 กลุ่ม", "Walk-in 7.8 | In-house 2.9", delta_color="off")
+        col2.metric("โต๊ะที่ถูกใช้ ณ จุด Peak Queue", "24 ยูนิต", "Walk-in 18 | In-house 6", delta_color="off")
+
+        st.divider()
+
+        # --- Data Prep เฉพาะวัน 153 ---
+        df_153 = df_all[df_all['Day'] == '153'].copy()
+        df_153['Guest_type'] = df_153['Guest_type'].astype(str).str.strip().str.title()
+        df_153['Guest_type'] = df_153['Guest_type'].replace({'Walk In': 'Walk-in', 'In House': 'In-house'})
+
+        df_153['q_start'] = pd.to_datetime('2026-01-01 ' + df_153['queue_start'].astype(str), errors='coerce')
+        df_153['q_end'] = pd.to_datetime('2026-01-01 ' + df_153['queue_end'].astype(str), errors='coerce')
+        df_153['m_start'] = pd.to_datetime('2026-01-01 ' + df_153['meal_start'].astype(str), errors='coerce')
+        df_153['m_end'] = pd.to_datetime('2026-01-01 ' + df_153['meal_end'].astype(str), errors='coerce')
+
+        time_range = pd.date_range("2026-01-01 07:00:00", "2026-01-01 11:30:00", freq="1min")
+        q_data, s_data = [], []
+
+        for t in time_range:
+            # คิว
+            q_w = ((df_153['Guest_type'] == 'Walk-in') & (df_153['q_start'] <= t) & (df_153['q_end'] > t)).sum()
+            q_i = ((df_153['Guest_type'] == 'In-house') & (df_153['q_start'] <= t) & (df_153['q_end'] > t)).sum()
+            q_data.append({'Time': t, 'Walk-in': q_w, 'In-house': q_i})
+            
+            # นั่งโต๊ะ
+            s_w = ((df_153['Guest_type'] == 'Walk-in') & (df_153['m_start'] <= t) & (df_153['m_end'] > t)).sum()
+            s_i = ((df_153['Guest_type'] == 'In-house') & (df_153['m_start'] <= t) & (df_153['m_end'] > t)).sum()
+            s_data.append({'Time': t, 'Walk-in': s_w, 'In-house': s_i})
+
+        df_q_sim = pd.DataFrame(q_data)
+        df_s_sim = pd.DataFrame(s_data)
+
+        # --- กราฟ 1: Active Seating (เพื่อโชว์ Bottleneck) ---
+        st.subheader("กราฟแสดงจำนวนโต๊ะที่ถูกใช้งาน (Table Occupancy) บนวัน 153")
+        st.markdown("ณ จุดพีก โต๊ะถูกใช้งานเต็มความจุ (~24 ยูนิต) การแซงคิวจึงไม่มีประโยชน์ เพราะไม่มีโต๊ะว่างให้ไปนั่งอยู่ดี")
+
+        fig_seat = go.Figure()
+        fig_seat.add_trace(go.Scatter(x=df_s_sim['Time'], y=df_s_sim['In-house'], mode='lines', stackgroup='one', name='In-house (แขกโรงแรม)', fillcolor='#2ecc71', line=dict(color='#27ae60')))
+        fig_seat.add_trace(go.Scatter(x=df_s_sim['Time'], y=df_s_sim['Walk-in'], mode='lines', stackgroup='one', name='Walk-in (ลูกค้าภายนอก)', fillcolor='#3498db', line=dict(color='#2980b9')))
+
+        # เพิ่มเส้น Max Capacity แบบจำลอง
+        fig_seat.add_hline(y=24, line_dash="dash", line_color="red", annotation_text="Max Capacity (~24 Tables)", annotation_position="top left")
+        fig_seat.update_layout(xaxis_tickformat='%H:%M', yaxis_title="จำนวนโต๊ะที่กำลังใช้งาน", hovermode="x unified")
+        st.plotly_chart(fig_seat, use_container_width=True)
+
+        # --- ข้อสรุป ---
+        st.error("""
+        **บทสรุป (Key Takeaway):** Queue Skipping ไม่ใช่ 'Capacity Solution' แต่เป็นแค่การย้ายความเจ็บปวด (Pain) ไปรวมไว้ที่ Walk-in ซึ่งจะยิ่งดันให้ยอด Walk-away พุ่งสูงขึ้น นำไปสู่วิกฤตด้านรีวิวและภาพลักษณ์ของโรงแรม วิธีแก้ที่ถูกต้องคือการจัดการ **Table Management (รวม/แยกโต๊ะตาม Pax)** หรือจูงใจด้วยราคาเพื่อลด **Arrival Bunching** ครับ
+        """)
 else:
     st.info("💡 กรุณาอัปโหลดไฟล์ Excel Dataset ของคุณที่ด้านบนเพื่อเริ่มต้นใช้งานแดชบอร์ด")
 
